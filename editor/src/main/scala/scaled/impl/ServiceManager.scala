@@ -68,6 +68,7 @@ class ServiceManager (app :Scaled) extends ServiceInjector(app.logger, app.exec,
   // wire the workspace and package managers up directly as well
   services.put(app.pkgMgr.getClass, app.pkgMgr)
   services.put(app.wspMgr.getClass, app.wspMgr)
+  services.put(app.wchMgr.getClass, app.wchMgr) // HHH
 
   // create our plugin manager and manually register it in the cache
   private var pluginMgr = new PluginManager(app)
@@ -84,6 +85,7 @@ class ServiceManager (app :Scaled) extends ServiceInjector(app.logger, app.exec,
   override def metaFile (name :String) = app.pkgMgr.metaDir.resolve(name)
 
   override def resolveService (sclass :Class[_]) = {
+    if (sclass == classOf[scaled.WatchService]) app.wchMgr else  // HHH
     if (!sclass.getName.endsWith("Service")) throw new InstantiationException(
       s"Service classes must be named FooService: $sclass")
     else app.pkgMgr.service(sclass.getName) match {

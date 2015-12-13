@@ -51,6 +51,7 @@ class Scaled extends Application with Editor {
   val server = new Server(this)
   val pkgMgr = new PackageManager(logger)
   val wspMgr = new WorkspaceManager(this)
+  val wchMgr = new WatchManager(logger, exec) // HHH
   val svcMgr = new ServiceManager(this)
   val cfgMgr = svcMgr.injectInstance(classOf[ConfigManager], Nil)
 

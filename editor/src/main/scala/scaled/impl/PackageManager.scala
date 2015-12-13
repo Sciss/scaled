@@ -31,8 +31,10 @@ class PackageManager (log :Logger) extends AbstractService with PackageService {
   def modules :Iterable[ModuleMeta] = metas.values
 
   /** Resolves the class for the mode named `name`. */
-  def mode (major :Boolean, name :String) :Option[Class[_]] =
+  def mode (major :Boolean, name :String) :Option[Class[_]] = {
+    if (major && name == "text") Some(classOf[scaled.major.TextMode]) else  // HHH
     Option(modeMap(major).get(name)).map(_.apply(name))
+  }
 
   /** Resolves the implementation class for the service with fq classname `name`. */
   def service (name :String) :Option[Class[_]] = Option(serviceMap.get(name)).map(_.apply(name))
