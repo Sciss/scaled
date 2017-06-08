@@ -33,5 +33,9 @@ lazy val root = Project(id = "scaled", base = file("."))
   .settings(
     description := "A Scalable editor, extensible via JVM languages",
     mainClass in Compile := Some("scaled.impl.Scaled"),
-    fork in run := true
+    fork in run := true,
+    libraryDependencies ++= Seq(
+      "junit" % "junit" % "4.12" % "test",
+      "com.novocode" % "junit-interface" % "0.11" % "test"
+    )
   )
