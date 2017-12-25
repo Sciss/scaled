@@ -1,7 +1,8 @@
 lazy val commonSettings = Seq(
-  scalaVersion := "2.11.7", // "2.12.0-M3",
-  version      := "1.0",
-  licenses     := Seq("New BSD" -> url("https://raw.githubusercontent.com/scaled/scaled/master/LICENSE"))
+  scalaVersion := "2.12.4",
+  version      := "0.1.0-SNAPSHOT",
+  licenses     := Seq("New BSD" -> url("https://raw.githubusercontent.com/scaled/scaled/master/LICENSE")),
+  organization := "de.sciss"
 )
 
 lazy val std = Project(id = "scaled-std", base = file("std"))
@@ -17,13 +18,17 @@ lazy val api = Project(id = "scaled-api", base = file("api"))
   .dependsOn(std)
   .settings(commonSettings)
 
-lazy val pacman = ProjectRef(uri("git://github.com/Sciss/pacman.git#sbtfied"), "pacman")
+// lazy val pacman = ProjectRef(uri("git://github.com/Sciss/pacman.git#sbtfied"), "pacman")
 
 lazy val editor = Project(id = "scaled-editor", base = file("editor"))
-  .dependsOn(api, pacman)
+  .dependsOn(api)
   .settings(commonSettings)
   .settings(
-    libraryDependencies += "org.ow2.asm" % "asm" % "5.0.1"
+    libraryDependencies ++= Seq(
+      "org.ow2.asm"           % "asm"            % "5.0.1",
+      "com.samskivert.scaled" % "mac-open-files" % "1.0",
+      "de.sciss"              % "pacman"         % "0.1.0-SNAPSHOT"
+    )
   )
 
 lazy val root = Project(id = "scaled", base = file("."))
