@@ -68,9 +68,8 @@ class PackageManager (log :Logger) extends AbstractService with PackageService {
   }
   private val skipToks = Set("", "usr", "local", "bin", "env", "opt")
 
-  /** Returns the set of minor modes that should be auto-activated for `tags` and `stateTypes`. */
-  def minorModes (tags :Seq[String], stateTypes :Set[Class[_]]) :Set[String] =
-    (tags.flatMap(minorTags.get _) ++ stateTypes.map(_.getName).flatMap(minorTypes.get _)).toSet
+  /** Returns the set of minor modes that should be auto-activated for `tags`. */
+  def tagMinorModes (tags :Seq[String]) :Set[String] = tags.flatMap(minorTags.get _).toSet
 
   override def didStartup () {} // not used
   override def willShutdown () {} // not used
@@ -85,9 +84,10 @@ class PackageManager (log :Logger) extends AbstractService with PackageService {
     bb.addKeysValues("Root: " -> metaDir.toString,
                      "Modules: " -> modmetas.size.toString)
 
+    val ignoreModuleJar = Props.ignoreModuleJar
     for (meta <- modmetas) {
       bb.addSubHeader(meta.mod.toString)
-      val codeDir = metaDir.relativize(meta.loader.mod.classpath)
+      val codeDir = metaDir.relativize(meta.loader.mod.classpath(ignoreModuleJar))
       bb.addKeysValues(Seq("Code: "        -> s"%root%/$codeDir",
                            "Majors: "      -> fmt(meta.majors),
                            "Minors: "      -> fmt(meta.minors),
@@ -96,8 +96,7 @@ class PackageManager (log :Logger) extends AbstractService with PackageService {
                            "Plugins: "     -> fmt(meta.plugins.asMap.entrySet),
                            "Patterns: "    -> fmt(meta.patterns.asMap.entrySet),
                            "Interps: "     -> fmt(meta.interps.asMap.entrySet),
-                           "Minor tags: "  -> fmt(meta.minorTags.asMap.entrySet),
-                           "Minor types: " -> fmt(meta.minorTypes.asMap.entrySet)
+                           "Minor tags: "  -> fmt(meta.minorTags.asMap.entrySet)
                            ).filter(_._2 != ""))
     }
   }
@@ -130,9 +129,8 @@ class PackageManager (log :Logger) extends AbstractService with PackageService {
       }
     }}
     meta.interps.asMap.toMapV foreach { (m, is) => is foreach { i => interps.put(i, m) }}
-    // map the tags & types defined by this pattern's minor modes
+    // map the tags defined by this pattern's minor modes
     minorTags.putAll(meta.minorTags)
-    minorTypes.putAll(meta.minorTypes)
     // tell any interested parties about this new package module
     PackageManager.this.moduleAdded.emit(meta)
   }
@@ -152,7 +150,6 @@ class PackageManager (log :Logger) extends AbstractService with PackageService {
   private val patterns   = SeqBuffer[(Pattern,String)]()
   private val interps    = HashMultimap.create[String,String]()
   private val minorTags  = HashMultimap.create[String,String]()
-  private val minorTypes = HashMultimap.create[String,String]()
 
   private val ScaledAPI = Source.parse("git:https://github.com/scaled/scaled.git#api")
   private val ScaledEditor = Source.parse("git:https://github.com/scaled/scaled.git#editor")

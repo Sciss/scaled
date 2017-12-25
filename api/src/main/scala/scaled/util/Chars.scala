@@ -5,7 +5,7 @@
 package scaled.util
 
 import scala.annotation.switch
-import scaled.Syntax
+import scaled._
 
 /** Provides functions for efficiently testing the nature of characters. Specifically, whether they
   * are whitespace, word or punctuation characters.
@@ -43,6 +43,7 @@ object Chars {
 
   /** Returns true for characters that are punctuation. */
   lazy val isPunctuation = new Pred() {
+    // small hack here to include ` and ^ in the punctuation class
     protected def slowApply (c :Char) = isPunctuationClass(c)
     override def toString = "isPunctuation"
   }
@@ -66,6 +67,29 @@ object Chars {
   }
   /** The upper-case category. */
   case object UpperCase extends Category(isUpperCase, isNotUpperCase)
+
+  /** Retursn whether `cs` has any upper-case characters. */
+  def mixedCase (cs :CharSequence, ii :Int = 0) :Boolean =
+    if (ii == cs.length) false
+    else if (isUpperCase(cs.charAt(ii))) true
+    else mixedCase(cs, ii+1)
+
+  /** Returns the start and end of the "word" at the specified location in the buffer. This scans
+    * backward and forward from `pos` for all characters that match the [[isWord]] predicate. */
+  def wordBoundsAt (buffer :Buffer, pos :Loc) :(Loc, Loc) = {
+    val pstart = buffer.scanBackward(isNotWord, pos)
+    val start = if (isWord(buffer.charAt(pstart))) pstart else buffer.forward(pstart, 1)
+    val end = if (!isWord(buffer.charAt(start))) start
+              else buffer.scanForward(isNotWord, pos)
+    (start, end)
+  }
+
+  /** Returns the "word" at the specified location in the buffer. This scans backward and forward
+    * from `pos` for all characters that match the [[isWord]] predicate. */
+  def wordAt (buffer :Buffer, pos :Loc) :String = {
+    val (start, end) = wordBoundsAt(buffer, pos)
+    buffer.region(start, end).map(_.asString).mkString
+  }
 
   abstract class Pred extends Function1[Char,Boolean] with Function2[Char,Syntax,Boolean] {
     private[this] val masks = new Array[Long](4)
@@ -94,10 +118,11 @@ object Chars {
   private def isWordClass (c :Char) :Boolean = {
     import Character._
     (getType(c) : @switch) match {
+      // small hack here to exclude ` and ^ from the word class
       case UNASSIGNED|UPPERCASE_LETTER|LOWERCASE_LETTER|TITLECASE_LETTER|MODIFIER_LETTER|
            OTHER_LETTER|NON_SPACING_MARK|ENCLOSING_MARK|COMBINING_SPACING_MARK|
            DECIMAL_DIGIT_NUMBER|LETTER_NUMBER|OTHER_NUMBER|PRIVATE_USE|SURROGATE|
-           CURRENCY_SYMBOL|MODIFIER_SYMBOL|OTHER_SYMBOL => true
+           CURRENCY_SYMBOL|MODIFIER_SYMBOL|OTHER_SYMBOL => !(c == '`' || c == '^')
       case _ => false
     }
   }
@@ -107,7 +132,8 @@ object Chars {
     (getType(c) : @switch) match {
       case DASH_PUNCTUATION|START_PUNCTUATION|END_PUNCTUATION|CONNECTOR_PUNCTUATION|
            OTHER_PUNCTUATION|INITIAL_QUOTE_PUNCTUATION|FINAL_QUOTE_PUNCTUATION|MATH_SYMBOL => true
-      case _ => false
+      // small hack here to include ` and ^ in the punctutation class
+      case _ => (c == '`' || c == '^')
     }
   }
 }

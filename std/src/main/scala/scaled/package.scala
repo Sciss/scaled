@@ -26,6 +26,11 @@ package object scaled {
   type JIterable[+A]  = java.lang.Iterable[A @uV]
   type JStringBuilder = java.lang.StringBuilder
 
+  // TODO: make these aliases if SI-8079 is ever fixed; sigh
+  trait JConsumer[-T] extends juf.Consumer[T @uV]
+  trait JPredicate[-T] extends juf.Predicate[T @uV]
+  trait JFunction[-T,+R] extends juf.Function[T @uV, R @uV]
+
   // for great Scala interop
   type SIterator[+A] = scala.collection.Iterator[A]
   type SIterable[+A] = scala.collection.Iterable[A]
@@ -69,6 +74,7 @@ package object scaled {
   }
 
   // some implicit conversions to make working with Scala collections easier
+  implicit def optToIterable[A] (opt :Option[A]) :Iterable[A] = opt.toIterable
   implicit class SeqOps[A] (private val as :SSeq[A]) extends AnyVal {
     // we can't use toSeq here because that's already defined on scala.Seq &c
     def fromScala = Seq(as :_*)

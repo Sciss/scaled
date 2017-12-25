@@ -4,19 +4,20 @@
 
 package scaled.impl
 
+import java.io.File
 import java.nio.file.{Path, Paths}
 import java.util.concurrent.Executors
+import java.util.{List => JList, ArrayList, Timer, TimerTask}
 import javafx.animation.{KeyFrame, Timeline}
 import javafx.application.{Application, Platform}
 import javafx.event.{ActionEvent, EventHandler}
 import javafx.stage.Stage
 import javafx.util.Duration
-import scala.collection.JavaConversions._
 import scaled._
+import scaled.platform.OpenFilesHelper
 import scaled.util.Errors
 
 class Scaled extends Application with Editor {
-
   private val pool = Executors.newFixedThreadPool(4) // TODO: config
 
   /** A signal emitted when a message is appended to the log. Because logging is app-global, but
@@ -25,28 +26,40 @@ class Scaled extends Application with Editor {
   val log = Signal[String]()
 
   val logger = new Logger {
-    override def log (msg :String) :Unit = exec.runOnUI { doLog(msg) }
-    override def log (msg :String, exn :Throwable) :Unit =
-      exec.runOnUI { doLog(msg) ; doLog(Errors.stackTraceToString(exn)) }
+    override def log (msg :String) :Unit = Platform.runLater(new Runnable() {
+      override def run = doLog(msg)
+    })
+    override def log (msg :String, exn :Throwable) :Unit = Platform.runLater(new Runnable() {
+      override def run = { doLog(msg) ; doLog(Errors.stackTraceToString(exn)) }
+    })
     private def doLog (msg :String) {
       debugLog(msg)
       Scaled.this.log.emit(msg)
     }
   }
 
-  override val exec = new Executor {
-    override val uiExec = new java.util.concurrent.Executor {
-      override def execute (op :Runnable) = Platform.runLater(op)
-    }
-    override val bgExec = pool
-    override def uiTimer (delay :Long) = {
-      val result = Promise[Unit]()
+  val timer = new Timer("Scaled Timer", true)
+
+  val uiScheduler = new Scheduler {
+    override def execute (op :Runnable) = Platform.runLater(op)
+    override def schedule (delay :Long, op :Runnable) = {
+      var canceled = false
       new Timeline(new KeyFrame(Duration.millis(delay), new EventHandler[ActionEvent]() {
-        override def handle (event :ActionEvent) = result.succeed(())
+        override def handle (event :ActionEvent) = if (!canceled) op.run()
       })).play()
-      result
+      Closeable({ canceled = true })
     }
   }
+  val bgScheduler = new Scheduler() {
+    override def execute (op :Runnable) = pool.execute(op)
+    override def schedule (delay :Long, op :Runnable) = {
+      val task = new TimerTask() { override def run () = op.run() }
+      timer.schedule(task, delay)
+      Closeable({ task.cancel() })
+    }
+  }
+  override val exec = new Executor(
+    uiScheduler, bgScheduler, err => logger.log(Errors.stackTraceToString(err)), Some(pool))
 
   val server = new Server(this)
   val pkgMgr = new PackageManager(logger)
@@ -65,15 +78,17 @@ class Scaled extends Application with Editor {
     // we have to defer resolution of auto-load services until the above constructors have
     // completed; always there are a twisty maze of initialization dependencies
     svcMgr.resolveAutoLoads()
-    // create the starting editor and visit therein the files specified on the command line
-    wspMgr.visit(stage, getParameters.getRaw)
+    // listen for open files events
+    OpenFilesHelper.setListener(files => onMainThread { files.foreach(wspMgr.visit) })
+    // create the starting editor and visit therein the starting files
+    val argvFiles = Seq.view(getParameters.getRaw) map wspMgr.resolve
+    wspMgr.visit(stage, argvFiles ++ OpenFilesHelper.launchFiles)
     // start our command server
     server.start()
-    // now that our main window is created, we can tweak the quit menu shortcut key
-    tweakQuitMenuItem()
   }
 
   override def stop () {
+    svcMgr.shutdown();
     pool.shutdown()
   }
 
@@ -87,26 +102,6 @@ class Scaled extends Application with Editor {
     if (System.getProperty("os.name") != "Mac OS X") getHostServices.showDocument(url)
     else Runtime.getRuntime.exec(Array("open", url))
   }
-
-  // tweaks the shortcut on the quit menu to avoid conflict with M-q
-  private def tweakQuitMenuItem () :Unit = try {
-    import com.sun.glass.{events => gevents, ui}
-    val app = ui.Application.GetApplication
-    val getAppleMenu = app.getClass.getMethod("getAppleMenu")
-    if (getAppleMenu != null) {
-      getAppleMenu.setAccessible(true)
-      val menu = getAppleMenu.invoke(app).asInstanceOf[ui.Menu]
-      val items = menu.getItems
-      val quit = items.get(items.size-1).asInstanceOf[ui.MenuItem]
-      quit.setShortcut('q', gevents.KeyEvent.MODIFIER_COMMAND|gevents.KeyEvent.MODIFIER_SHIFT)
-    }
-
-  } catch {
-    case nsme :NoSuchMethodException => // nothing to see here, move it along
-    case t :Throwable =>
-      println("Failed to tweak Quit menu item")
-      t.printStackTrace(System.err)
-  }
 }
 
 object Scaled {
@@ -115,6 +110,9 @@ object Scaled {
   final val Port = (Option(System.getenv("SCALED_PORT")) getOrElse "32323").toInt
 
   def main (args :Array[String]) {
+    // if we're running on Mac, wire up an open files handler; this has to happen immediately or
+    // we'll miss events delivered right after startup
+    OpenFilesHelper.init()
     // if there's already a Scaled instance running, pass our args to it and exit; otherwise launch
     // our fully operational mothership
     if (!sendFiles(args)) Application.launch(classOf[Scaled], args :_*)
@@ -122,10 +120,11 @@ object Scaled {
 
   private def sendFiles (args :Array[String]) :Boolean = {
     import java.io.{IOException, OutputStreamWriter, PrintWriter}
-    import java.net.{ConnectException, Socket}
+    import java.net.{ConnectException, Socket, InetSocketAddress}
 
     try {
-      val sock = new Socket("localhost", Port)
+      val sock = new Socket()
+      sock.connect(new InetSocketAddress("localhost", Port), 2000)
       val out = new PrintWriter(new OutputStreamWriter(sock.getOutputStream(), "UTF-8"))
       val cwd = Paths.get(System.getProperty("user.dir"))
       args foreach { file => out.println(s"open ${cwd.resolve(Paths.get(file))}") }

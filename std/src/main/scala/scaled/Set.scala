@@ -64,10 +64,6 @@ abstract class Set[A] extends Unordered[A] with (A => Boolean) {
   /** An alias for [[remove]]. */
   def - (elem :A) :Set[A] = remove(elem)
 
-  /** Applies `f` to each element of this set and returns a new set that contains the union of the
-    * resulting sets. */
-  def flatMap[B] (f :A => JIterable[B]) :Set[B] = foldBuild[B]((b, a) => b ++= f(a))
-
   // views
   /** Returns a view of this seq as a [[JList]]. */
   def asJSet :JSet[A] = new AbstractSet[A]() {
@@ -82,6 +78,7 @@ abstract class Set[A] extends Unordered[A] with (A => Boolean) {
 
   override def filter (pred :A => Boolean) :Set[A] = super.filter(pred).toSet
   override def filterNot (pred :A => Boolean) :Set[A] = super.filterNot(pred).toSet
+  override def flatMap[B] (f :A => JIterable[B]) :Set[B] = super.flatMap(f).toSet
   override def foldBuild[B] (op :(Unordered.Builder[B],A) => Unit) :Set[B] =
     super.foldBuild(op).toSet
   override def map[B] (f :A => B) :Set[B] = super.map(f).toSet
@@ -171,7 +168,8 @@ object Set {
   def from[A <: AnyRef] (elems :Array[A]) :Set[A] = mkSet(
     elems.asInstanceOf[Array[Any]], elems.length)
 
-  private def mkSet[A] (elems :Array[Any], size :Int) :Set[A] = OpenHashSet.make(elems, size)
+  private def mkSet[A] (elems :Array[Any], size :Int) :Set[A] =
+    if (size == 0) empty else OpenHashSet.make(elems, size)
 
   /** Returns a view of the Java `set` as a [[Set]]. `set` is assumed to be effectively immutable
     * for the lifetime of this view. Violate this assumption at your peril. */

@@ -4,7 +4,8 @@
 
 package scaled.util
 
-import java.io.{BufferedReader, InputStreamReader, OutputStreamWriter, PrintWriter}
+import java.io.{BufferedReader, Reader, PrintWriter}
+import java.io.{InputStream, InputStreamReader, OutputStreamWriter}
 import java.nio.file.{Path, Paths}
 import java.util.concurrent.{Executor => JExecutor}
 import scaled._
@@ -41,7 +42,7 @@ object SubProcess {
     * failure, `true` if it's closed normally. */
   def apply (config :Config, exec :Executor, buffer :Buffer,
              onExit :Boolean => Unit = noopOnExit) :SubProcess = {
-    val events = Signal[Event](exec.uiExec)
+    val events = Signal[Event](exec.ui)
     events.onValue { _ match {
       case Output(text, _) => buffer.append(Line.fromTextNL(text))
       case Complete(isErr) => if (!isErr) onExit(true)
@@ -62,8 +63,7 @@ object SubProcess {
   * UI executor. Note also that events may be emitted *during* the construction of this SubProcess,
   * so any listeners should already be in place before the signal is passed into this constructor.
   */
-class SubProcess (config :SubProcess.Config, events :Signal[SubProcess.Event])
-    extends AutoCloseable {
+class SubProcess (config :SubProcess.Config, events :Signal[SubProcess.Event]) extends Closeable {
   import SubProcess._
 
   /** Sends `line` to the subprocess's stdin. A newline is automatically appended. */
@@ -83,7 +83,7 @@ class SubProcess (config :SubProcess.Config, events :Signal[SubProcess.Event])
 
   /** Closes this subprocess's output stream. This may trigger termination if it expects that sort
     * of thing. This must only be called after [[start]]. */
-  def close () {
+  override def close () {
     process.getOutputStream.close()
   }
 
@@ -135,13 +135,44 @@ class SubProcess (config :SubProcess.Config, events :Signal[SubProcess.Event])
     pb.start
   }
 
-  protected lazy val out = new PrintWriter(new OutputStreamWriter(process.getOutputStream, "UTF-8"))
+  protected lazy val out =
+    new PrintWriter(new OutputStreamWriter(process.getOutputStream, "UTF-8"))
+
+  // filter out CR to avoid wonkiness on Windows: TODO: make this optional?
+  private class FilterCRReader(source :Reader) extends Reader {
+    override def read :Int = {
+      val c = source.read()
+      if (c == '\r') this.read
+      else c
+    }
+
+    override def read (cbuf :Array[Char], offset :Int, length :Int) = {
+      var read = source.read(cbuf, offset, length)
+      var filtered = 0
+      var ii = 0; while (ii < read) {
+        val pos = offset+ii
+        if (cbuf(pos) == '\r') {
+          System.arraycopy(cbuf, pos+1, cbuf, pos, read-ii-1)
+          ii -= 1
+          read -= 1
+          filtered += 1
+        }
+        ii += 1
+      }
+      read
+    }
+
+    override def close () = source.close()
+  }
+
+  private def lineReader (is :InputStream) =
+    new BufferedReader(new FilterCRReader(new InputStreamReader(is, "UTF-8")))
 
   // kick things off immediately; if the process fails to start, an exception will be thrown before
   // these threads are started; otherwise they'll run until the process's streams are closed
   try {
-    val in  = new BufferedReader(new InputStreamReader(process.getInputStream, "UTF-8"))
-    val err = new BufferedReader(new InputStreamReader(process.getErrorStream, "UTF-8"))
+    val in  = lineReader(process.getInputStream)
+    val err = lineReader(process.getErrorStream)
     new Thread("Subproc: stdin") {
       setDaemon(true)
       override def run () = read(in, false)

@@ -7,7 +7,7 @@ package scaled.impl
 import java.util.{HashMap, HashSet}
 import java.nio.file.{Path, Files}
 import scaled._
-import scaled.util.Properties
+import scaled.util.{Filler, Properties}
 
 class ConfigImpl (name :String, val file :Path, val scope :Config.Scope,
                   defs :List[Config.Defs], parent :Option[ConfigImpl])
@@ -18,13 +18,15 @@ class ConfigImpl (name :String, val file :Path, val scope :Config.Scope,
 
   override def toProperties :Seq[String] = {
     val buf = Seq.builder[String]()
-    buf += s"# Scaled '$name' config vars"
-    buf += s"#"
-    buf += s"# This file is managed by Scaled. Uncomment and customize the value of any"
-    buf += s"# desired config vars. Other changes will be ignored."
+    buf += s"## Scaled '$name' config vars"
+    buf += s"##"
+    buf += s"## This file is managed by Scaled. Uncomment and customize the value of any"
+    buf += s"## desired config vars. Other changes will be ignored."
     _vars.values.toSeq.sortBy(_.name) foreach { case cvar :Config.Var[t] =>
       buf += "" // preceed each var by a blank link and its description
-      buf += s"# ${cvar.descrip}"
+      val filler = new Filler(77)
+      filler.append(Filler.flatten(cvar.descrip))
+      filler.filled foreach { line => buf += s"## $line" }
       val cval = resolve(cvar.key)
       val curval = cval.value.get ; val defval = cvar.key.defval(this)
       val (pre, showval) = if (cval.isSet && curval != defval) ("", curval) else ("# ", defval)
@@ -54,7 +56,7 @@ class ConfigImpl (name :String, val file :Path, val scope :Config.Scope,
     fn { (key, value) => _vars.get(key) match {
       case None => log.log(s"$name config contains unknown/stale setting '$key: $value'.")
       case Some(cvar) => try {
-        resolve(cvar.key).init(cvar.key.converter.read(value))
+        resolve(cvar.key).initFrom(value)
         initted.add(key)
       } catch {
         case e :Exception => log.log(s"$name config contains invalid setting: '$key: $value': $e")
@@ -76,6 +78,7 @@ class ConfigImpl (name :String, val file :Path, val scope :Config.Scope,
     reset()
 
     def isSet :Boolean = conn == null
+    def initFrom (value :String) :Unit = init(key.converter.read(value))
     def init (newval :T) {
       value() = newval
       if (conn != null) { conn.close() ; conn = null }

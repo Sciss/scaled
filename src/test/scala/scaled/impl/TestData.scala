@@ -19,12 +19,11 @@ object TestData {
     }
   }
 
-  val exec = new Executor {
-    val uiExec = new java.util.concurrent.Executor() {
-      override def execute (op :Runnable) = op.run()
-    }
-    val bgExec = uiExec
+  val immSched = new Scheduler() {
+    override def execute (op :Runnable) = op.run()
+    override def schedule (delay :Long, op :Runnable) = throw new UnsupportedOperationException()
   }
+  val exec = new Executor(immSched, immSched, _.printStackTrace(System.err), None)
 
   val cwd = Paths.get("")
   val testScope = Config.Scope("test", cwd, None)
@@ -50,6 +49,10 @@ object TestData {
     def killBuffer (buffer :Buffer) {}
     def addHintPath (path :Path) {}
     def removeHintPath (path :Path) {}
+    def exec = editor.exec
+    def emitError (err :Throwable) {
+      err.printStackTrace(System.err)
+    }
     protected def log = TestData.log
   }
 
@@ -60,6 +63,8 @@ object TestData {
     def focus = ???
     def workspace = TestData.workspace
     def close () {}
+    def buffers = Seq()
+    def exec = workspace.exec
     def emitError (err :Throwable) = err.printStackTrace(System.err)
     def popStatus (msg :String, subtext :String) {
       println(msg)

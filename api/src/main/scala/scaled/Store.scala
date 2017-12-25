@@ -7,6 +7,7 @@ package scaled
 import java.io.{File, FileNotFoundException, FileReader, FileWriter, Reader, Writer}
 import java.io.{BufferedReader, BufferedWriter, InputStreamReader, StringReader}
 import java.nio.file.{Files, Path, Paths, StandardCopyOption}
+import java.nio.file.attribute.PosixFileAttributeView
 import java.util.zip.ZipFile
 
 /** A place from which to read and optionally to which to write data. This is slightly more general
@@ -35,13 +36,14 @@ abstract class Store {
   /** Reads the contents of this store line by line, applying `fn` to each line in the store. `fn`
     * is also passed the character offset of the start of the line. */
   def readLines (fn :(String, Int) => Unit) {
+    val lineSep = System.lineSeparator
     read({ r =>
       val buffed = new BufferedReader(r)
       var offset = 0
       var line :String = buffed.readLine()
       while (line != null) {
         fn(line, offset)
-        offset += line.length + 1 // TODO: handle \r\n?
+        offset += line.length + lineSep.length
         line = buffed.readLine()
       }
     })
@@ -58,6 +60,14 @@ abstract class Store {
   /** Writes `lines` to this store. */
   def write (lines :Iterable[Store.Writable]) :Unit =
     throw new UnsupportedOperationException(s"$name is not writable.")
+
+  /** Returns last modified time of backing file, or 0L for non-file stores. */
+  def lastModified :Long = file.map { path =>
+    try if (Files.exists(path)) Files.getLastModifiedTime(path).toMillis else 0L
+    catch {
+      case e :Throwable => System.err.println(s"lastModified failed $path: $e") ; 0L
+    }
+  } || 0L
 
   // re-abstract these methods to be sure we don't forget to implement them
   override def equals (other :Any) :Boolean
@@ -110,7 +120,8 @@ class FileStore private (val path :Path) extends Store {
     Files.createDirectories(path.getParent) // make sure our parent directory exists
     // TODO: file encoding?
     val temp = path.resolveSibling(name + "~")
-    val perms = if (exists) Files.getPosixFilePermissions(path) else null
+    val canPosix = Files.getFileAttributeView(path, classOf[PosixFileAttributeView]) != null
+    val perms = if (exists && canPosix) Files.getPosixFilePermissions(path) else null
     val out = new BufferedWriter(new FileWriter(temp.toFile))
     try {
       val iter = lines.iterator ; while (iter.hasNext) {

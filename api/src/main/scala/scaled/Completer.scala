@@ -27,8 +27,8 @@ abstract class Completion[+T] (
     * `comps` to contain only those elements which [[FuzzyMatch]] `prefix`. */
   def refine (prefix :String) :Completion[T]
 
-  /** Returns the default value to use when committed with a non-matching value. */
-  def onNonMatch :Option[T] = comps.headOption.flatMap(apply)
+  /** Returns the first completion, if any. */
+  def first :Option[T] = comps.headOption.flatMap(apply)
 
   override def toString = s"Completion($comps)"
 }
@@ -108,24 +108,24 @@ object Completion {
 abstract class Completer[T] {
 
   /** Generates a completion for the specified initial prefix. */
-  def apply (prefix :String) :Completion[T] =
+  def apply (prefix :String) :Future[Completion[T]] =
     if (prefix.length >= minPrefix) complete(prefix)
-    else Completion.empty(prefix)
+    else Future.success(Completion.empty(prefix))
 
   /** Refines an existing completion given the supplied prefix. */
-  def refine (comp :Completion[T], prefix :String) :Completion[T] = {
+  def refine (comp :Completion[T], prefix :String) :Future[Completion[T]] = {
     val oglob = comp.glob
     // if prefix is (still) too short, return empty completion
-    if (prefix.length < minPrefix) Completion.empty(prefix)
+    if (prefix.length < minPrefix) Future.success(Completion.empty(prefix))
     // if the previous completion is empty, we need to generate a proper completion now that we
     // have a sufficiently long prefix
     else if (oglob.length < minPrefix) apply(prefix)
     // normal case: extending an existing match
-    else if (refines(prefix, oglob)) comp.refine(prefix)
+    else if (refines(prefix, oglob)) Future.success(comp.refine(prefix))
     // backspace case: new glob is prefix of old glob
     else if (oglob startsWith prefix) {
       // if we're still within our root glob, refine from there
-      if (refines(prefix, comp.root.glob)) comp.root.refine(prefix)
+      if (refines(prefix, comp.root.glob)) Future.success(comp.root.refine(prefix))
       // otherwise we need to generate a new completion
       else apply(prefix)
     }
@@ -134,7 +134,12 @@ abstract class Completer[T] {
   }
 
   /** Returns the value identified by `curval` given the current completion `comp`. */
-  def commit (comp :Completion[T], curval :String) :Option[T] = comp(curval) orElse comp.onNonMatch
+  def commit (comp :Completion[T], curval :String) :Option[T] =
+    comp(curval) orElse onNonMatch(comp, curval)
+
+  /** Returns the default value to use when committed with a non-matching value. */
+  def onNonMatch (comp :Completion[T], curval :String) :Option[T] =
+    if (comp.comps.size == 1) comp.first else None
 
   /** If the value being completed is a path, this separator will be used to omit the path elements
     * shared by the currently displayed prefix and the current completions. */
@@ -151,7 +156,7 @@ abstract class Completer[T] {
 
   /** Generates a list of completions which start with `prefix`. `prefix` will be exactly
     * [[minPrefix]] characters long. */
-  protected def complete (prefix :String) :Completion[T]
+  protected def complete (prefix :String) :Future[Completion[T]]
 }
 
 /** Some useful completion functions. */
@@ -159,45 +164,50 @@ object Completer {
 
   /** A noop completer (for strings). */
   val none :Completer[String] = new Completer[String]() {
-    def complete (prefix :String) = new Completion[String](prefix, Seq(prefix)) {
-      def root :Completion[String] = this
-      def apply (prefix :String) = Some(prefix)
-      def refine (prefix :String) = complete(prefix)
-    }
+    def complete (prefix :String) = Future.success(completeSync(prefix))
+    private def completeSync (prefix :String) :Completion[String] =
+      new Completion[String](prefix, Seq(prefix)) {
+        def root :Completion[String] = this
+        def apply (prefix :String) = Some(prefix)
+        def refine (prefix :String) = completeSync(prefix)
+      }
   }
 
   /** Returns a completer over `names`.
     * @param requireComp whether to require a completion from the supplied set. */
   def from (names :Iterable[String]) = new Completer[String] {
-    def complete (prefix :String) = Completion.string(prefix, names)
+    def complete (prefix :String) = Future.success(Completion.string(prefix, names))
   }
 
   /** Returns a completer over `things` using `nameFn` to obtain each thing's name. */
   def from[T] (things :Iterable[T])(nameFn :T => String) = new Completer[T]() {
-    def complete (prefix :String) = Completion(prefix, things, true)(nameFn)
+    def complete (prefix :String) = Future.success(Completion(prefix, things, true)(nameFn))
   }
 
   /** Returns a completer on buffer name. */
-  def buffer (wspace :Workspace, defbuf :Buffer) :Completer[Buffer] = buffer(wspace, defbuf, Set())
+  def buffer (buffers :SeqV[Buffer], defbuf :Buffer) :Completer[Buffer] =
+    buffer(buffers, defbuf, Set())
 
   /** Returns a completer on buffer name. This behaves specially in that the empty completion omits
     * transient buffers (buffers named `*foo*`).
     * @param except a set of buffers to exclude from completion.
     */
-  def buffer (wspace :Workspace, defbuf :Buffer, except :Set[Buffer]) :Completer[Buffer] =
+  def buffer (buffers :SeqV[Buffer], defbuf :Buffer, except :Set[Buffer]) :Completer[Buffer] =
     new Completer[Buffer] {
       def complete (prefix :String) = {
         val bb = Seq.builder[Buffer]()
         bb += defbuf
         // add the non-scratch buffers, sorted by name
-        bb ++= wspace.buffers.filter(
+        bb ++= buffers.filter(
           b => !except(b) && !Buffer.isScratch(b.name) && b != defbuf).sortBy(_.name)
         // add the scratch buffers after the non-scratch buffers, also sorted by name
-        bb ++= wspace.buffers.filter(
+        bb ++= buffers.filter(
           b => !except(b) && Buffer.isScratch(b.name) && b != defbuf).sortBy(_.name)
         val bufs = bb.build()
-        Completion(prefix, bufs.map(_.name), bufs.mapBy(_.name))
+        Future.success(Completion(prefix, bufs.map(_.name), bufs.mapBy(_.name)))
       }
+      override def onNonMatch (comp :Completion[Buffer], curval :String) =
+        if (curval.length == 0) comp.first else super.onNonMatch(comp, curval)
     }
 
   /** Returns true if `full` starts with `prefix`, ignoring case, false otherwise. */
@@ -218,7 +228,8 @@ object Completer {
   }
 
   /** Returns the longest shared prefix of all the strings in `strs`. */
-  def longestPrefix (strs :Iterable[String]) = strs reduce sharedPrefix
+  def longestPrefix (strs :Iterable[String]) =
+    if (strs.iterator.hasNext) strs reduce sharedPrefix else ""
 
   /** Returns the longest shared prefix of `a` and `b`. Matches case loosely, using uppercase
     * only when both strings have the character in uppercase, lowercase otherwise. */
@@ -246,7 +257,7 @@ object Completer {
   def defang (name :String) :String = name.replace('\n', ' ').replace('\r', ' ')
 
   /** A completer on file system files. */
-  val file :Completer[Store] = new Completer[Store] {
+  def file (exec :Executor) :Completer[Store] = new Completer[Store] {
     override def complete (prefix :String) = {
       val (pstr, path, endInSep) = grok(prefix)
       if (endInSep && Files.isDirectory(path)) expand(pstr, path, "")
@@ -256,7 +267,7 @@ object Completer {
       }
     }
 
-    override def refine (comp :Completion[Store], prefix :String) :Completion[Store] = {
+    override def refine (comp :Completion[Store], prefix :String) = {
       val (pstr, path, endInSep) = grok(prefix)
       if (endInSep && Files.isDirectory(path)) expand(pstr, path, "")
       // it's possible for us to get more than a whole directory ahead of our completion, i.e. the
@@ -285,7 +296,7 @@ object Completer {
       }
     }
 
-    private def expand (path :String, dir :Path, prefix :String) :Completion[Store] = {
+    private def expand (path :String, dir :Path, prefix :String) = exec.runAsync({
       val fstream = if (Files.exists(dir)) Files.list(dir) else Stream.empty[Path]()
       val files = try fstream.iterator.toSeq finally fstream.close()
       val matches = new FileFuzzyMatch(prefix).filterBy(files)(p => defang(p.getFileName.toString))
@@ -301,8 +312,8 @@ object Completer {
         override def root = this
         override def toString = s"($dir, $prefix) => $mstrs"
       }
-      new FileComp(path, matches.map(format))
-    }
+      new FileComp(path, matches.map(format)) :Completion[Store]
+    })
 
     private def fromString (value :String) = {
       val path = Paths.get(value)

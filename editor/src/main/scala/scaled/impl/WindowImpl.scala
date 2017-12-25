@@ -14,7 +14,7 @@ import javafx.stage.Stage
 import scala.collection.mutable.{Map => MMap}
 import scaled._
 import scaled.major.TextMode
-import scaled.util.Errors
+import scaled.util.{Close, Errors}
 
 /** The editor pane groups together the various UI components that are needed to edit a single
   * buffer. This includes the code area, status line and minibuffer area. It also manages the
@@ -28,7 +28,8 @@ class WindowImpl (val stage :Stage, ws :WorkspaceImpl, defWidth :Int, defHeight 
     extends Region with Window {
 
   class FrameImpl extends BorderPane with Frame {
-    var onKill :Connection = _
+    var toClose = Close.bag()
+    var onStale = Connection.Noop
     var disp :DispatcherImpl = _
     var prevStore :Option[Store] = None // this also implements 'def prevStore' in Frame
 
@@ -50,13 +51,23 @@ class WindowImpl (val stage :Stage, ws :WorkspaceImpl, defWidth :Int, defHeight 
         val view = new BufferViewImpl(buf, defWidth, defHeight)
         // TODO: move this to LineNumberMode? (and enable col number therein)
         mline.addDatum(view.point map(p => s" L${p.row+1} C${p.col} "), "Current line number")
-        // add "*" to our list of tags as this is a "real" buffer; we want global minor modes, but we
-        // don't want non-real buffers (like the minimode buffer) to have global minor modes
+        // add "*" to our list of tags as this is a "real" buffer; we want global minor modes, but
+        // we don't want non-real buffers (like the minimode buffer) to have global minor modes
         val tags = "*" :: Mode.tagsHint(buf.state)
 
+        // close our listeners for the old buffer
+        toClose.close()
+
+        // listen for buffer staleness and reload or freakout as appropriate
+        toClose += buf.stale.onEmit {
+          if (!buf.dirty) revisitFile()
+          else popStatus("File visited by this buffer was modified externally!")
+        }
+
         // listen for buffer death and repopulate this frame as needed
-        if (onKill != null) onKill.close()
-        onKill = buf.killed.onEmit { setBuffer(ws.buffers.headOption || ws.getScratch(), true) }
+        toClose += buf.killed.onEmit {
+          setBuffer(_visitedBuffers.headOption || ws.getScratch(), true)
+        }
 
         if (disp != null) {
           prevStore = Some(this.view.buffer.store)
@@ -68,10 +79,6 @@ class WindowImpl (val stage :Stage, ws :WorkspaceImpl, defWidth :Int, defHeight 
           Mode.nameHint(buf.state, ws.app.pkgMgr.detectMode(buf.store.name, buf.lines(0).asString)),
           Mode.argsHint(buf.state), tags)
 
-        // TODO: rename this buffer to name<2> (etc.) if its name conflicts with an existing buffer;
-        // also set up a listener on it such that if it is written to a new file and that new file
-        // has a name that conflicts with an existing buffer, we name<2> it then as well
-
         setCenter(disp.area)
         setBottom(mline)
         focus()
@@ -81,29 +88,31 @@ class WindowImpl (val stage :Stage, ws :WorkspaceImpl, defWidth :Int, defHeight 
         // what emacs does and who are we to question five decades of hard won experience
         if (buf.store.file.isDefined && !buf.store.exists) emitStatus("(New file)")
 
+        // make a note that we visited this buffer in our window
+        noteVisitedBuffer(buf)
+
         // make sure our window is visible and up front
         WindowImpl.this.toFront()
 
         view
       }
 
-    def dispose (willHibernate :Boolean) {
-      if (onKill != null) onKill.close()
-      // if we're going to hibernate, then our buffers are all going away; let the dispatcher know
+    def dispose (workspaceClosing :Boolean) {
+      toClose.close()
+      // if the workspace is closing, then our buffers are all going away; let the dispatcher know
       // that so that it can clean up active modes more efficiently
-      disp.dispose(willHibernate)
+      disp.dispose(workspaceClosing)
     }
 
     override def geometry = Geometry(disp.area.width, disp.area.height, 0, 0) // TODO: x/y pos
-    override def view = disp.area.bview
+    override def view :BufferViewImpl = if (disp != null) disp.area.bview else null
     override def visit (buffer :Buffer) = setBuffer(buffer.asInstanceOf[BufferImpl], false)
   }
 
   /** Used to resolve modes in this window/frame. */
   def resolver (frame :FrameImpl, buf :BufferImpl) = new ModeResolver(ws.app.svcMgr, this, frame) {
     override def modes (major :Boolean) = Set() ++ ws.app.pkgMgr.modes(major)
-    override def minorModes (tags :Seq[String], stateTypes :Set[Class[_]]) =
-      ws.app.pkgMgr.minorModes(tags, stateTypes)
+    override def tagMinorModes (tags :Seq[String]) = ws.app.pkgMgr.tagMinorModes(tags)
 
     override protected def locate (major :Boolean, mode :String) =
       ws.app.pkgMgr.mode(major, mode) match {
@@ -147,6 +156,14 @@ class WindowImpl (val stage :Stage, ws :WorkspaceImpl, defWidth :Int, defHeight 
   override val onClose = Signal[Window]()
   override def close () = ws.close(this)
 
+  private val _visitedBuffers = SeqBuffer[BufferImpl]()
+  private def noteVisitedBuffer (buffer :BufferImpl) {
+    val hadBuffer = _visitedBuffers remove buffer
+    _visitedBuffers prepend buffer
+    if (!hadBuffer) buffer.killed.onEmit(_visitedBuffers remove buffer)
+  }
+  override def buffers = _visitedBuffers
+
   override def popStatus (msg :String, subtext :String) {
     _statusPopup.showStatus(msg, subtext)
     ws.recordMessage(msg)
@@ -156,6 +173,7 @@ class WindowImpl (val stage :Stage, ws :WorkspaceImpl, defWidth :Int, defHeight 
     _statusLine.setText(msg)
     if (!ephemeral) ws.recordMessage(msg)
   }
+  override val exec = ws.exec.handleErrors(emitError)
   override def emitError (err :Throwable) :Unit = err match {
     // if this is a wrapped reaction exception, unwrap
     case re :ReactionException => re.getSuppressed foreach(emitError)
@@ -165,11 +183,7 @@ class WindowImpl (val stage :Stage, ws :WorkspaceImpl, defWidth :Int, defHeight 
         case null => err.toString
         case msg  => msg
       })
-      if (!Errors.isFeedback(err)) {
-        val trace = Errors.stackTraceToString(err)
-        ws.app.debugLog(trace)
-        ws.recordMessage(trace)
-      }
+      ws.emitError(err)
     }
 
   override def clearStatus () = {

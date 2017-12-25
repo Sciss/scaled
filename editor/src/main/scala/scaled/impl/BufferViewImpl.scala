@@ -21,6 +21,13 @@ class BufferViewImpl (_buffer :BufferImpl, initWidth :Int, initHeight :Int)
 
   private val _toClose = Close.bag()
 
+  val popupAdded = Signal[OptValue[Popup]]()
+  override def addPopup (popup :Popup) = {
+    val popopt = OptValue(popup)
+    popupAdded.emit(popopt)
+    popopt
+  }
+
   def clearEphemeralPopup () {
     if (popup.isDefined && popup().isEphemeral) popup.clear()
   }

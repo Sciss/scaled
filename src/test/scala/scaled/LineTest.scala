@@ -139,6 +139,25 @@ class LineTest {
     val lb = Line.builder("Test")
     lb += " foo"
     lb += " bar"
-    assertEquals(Line("Test foo bar"), lb.build())
+    lb += '!'
+    lb += Line(" Wow!")
+    assertEquals(Line("Test foo bar! Wow!"), lb.build())
+  }
+
+  @Test def testSplitLines () {
+    assertEquals(Seq(""), Line.splitText(""))
+    assertEquals(Seq("Foo bar"), Line.splitText("Foo bar"))
+    assertEquals(Seq("Foo bar", ""), Line.splitText("Foo bar\n"))
+    assertEquals(Seq("Foo bar", ""), Line.splitText("Foo bar\r"))
+    assertEquals(Seq("Foo bar", ""), Line.splitText("Foo bar\r\n"))
+    assertEquals(Seq("Foo bar", "baz bing"), Line.splitText("Foo bar\nbaz bing"))
+    assertEquals(Seq("Foo bar", "baz bing"), Line.splitText("Foo bar\rbaz bing"))
+    assertEquals(Seq("Foo bar", "baz bing"), Line.splitText("Foo bar\r\nbaz bing"))
+    assertEquals(Seq("Foo bar", "", "baz bing"), Line.splitText("Foo bar\n\nbaz bing"))
+    assertEquals(Seq("Foo bar", "", "baz bing"), Line.splitText("Foo bar\r\rbaz bing"))
+    assertEquals(Seq("Foo bar", "", "baz bing"), Line.splitText("Foo bar\r\n\r\nbaz bing"))
+    assertEquals(Seq("Foo bar", "", "", "baz bing"), Line.splitText("Foo bar\n\n\nbaz bing"))
+    assertEquals(Seq("Foo bar", "", "", "baz bing"), Line.splitText("Foo bar\r\r\rbaz bing"))
+    assertEquals(Seq("Foo bar", "", "", "baz bing"), Line.splitText("Foo bar\r\n\r\n\r\nbaz bing"))
   }
 }

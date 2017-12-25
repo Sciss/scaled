@@ -39,35 +39,41 @@ class WorkspaceManager (app :Scaled) extends AbstractService with WorkspaceServi
     new WorkspaceImpl(app, WorkspaceManager.this, name, wsdir.resolve(name))
   }}
 
-  /** Visits `paths` in the appropriate workspace windows, creating them as needed.
-    * The first window created will inherit the supplied default stage. */
-  def visit (stage :Stage, paths :JList[String]) {
-    val ws2paths = ((paths map resolve) groupBy workspaceFor).toSeq
-    // the first workspace (chosen arbitrarily) gets the default stage
-    ws2paths.take(1) foreach { case (ws, paths) =>
-      paths foreach { ws.open(stage).visitPath _ }
-    }
-    // the remaining workspaces (if any) create new stages
-    ws2paths.drop(1) foreach { case (ws, paths) =>
-      paths foreach { ws.open().visitPath _ }
-    }
-    // if we have no arguments, open the default workspace with a scratch buffer
-    if (ws2paths.isEmpty) defaultWS.open(stage).visitScratchIfEmpty()
-  }
-
-  /** Visits `path` in the appropriate workspace window. If no window exists one is created. */
-  def visit (path :String) {
-    val p = resolve(path)
-    workspaceFor(p).open().visitPath(p)
-  }
-
-  private def resolve (path :String) :Path = {
+  /** Resolves `path` to a fully qualified path. Tries to do something sensible if the path refers
+    * to a non-existent file (i.e. one the user probably wants to create). */
+  def resolve (path :String) :Path = {
     val p = Paths.get(path)
     // attempt to absolute-ize the path; if it does not exist and is not already absolute, fall
     // back to tacking in onto the cwd so that we a chance at properly deducing workspace
     val ap = if (p.isAbsolute) p else if (Files.exists(p)) p.toAbsolutePath else cwd.resolve(p)
     // finally normalize the resulting path to get rid of funny business
     ap.normalize
+  }
+
+  /** Visits `path` in the appropriate workspace window. If no window exists one is created. */
+  def visit (path :Path) :Unit = workspaceFor(path).open().visitPath(path)
+
+  /** Visits `paths` in the appropriate workspace windows, creating them as needed.
+    * The first window created will inherit the supplied default stage. */
+  def visit (stage :Stage, paths :SeqV[Path]) {
+    try {
+      val ws2paths = (paths groupBy workspaceFor).toSeq
+      // the first workspace (chosen arbitrarily) gets the default stage
+      ws2paths.take(1) foreach { case (ws, paths) =>
+        paths foreach { ws.open(stage).visitPath _ }
+      }
+      // the remaining workspaces (if any) create new stages
+      ws2paths.drop(1) foreach { case (ws, paths) =>
+        paths foreach { ws.open().visitPath _ }
+      }
+      // if we have no arguments, open the default workspace with a scratch buffer
+      if (ws2paths.isEmpty) defaultWS.open(stage).visitScratchIfEmpty()
+    } catch {
+      case e :Throwable =>
+        val win = defaultWS.open(stage)
+        win.visitScratchIfEmpty()
+        win.emitError(e)
+    }
   }
 
   def checkExit () {
@@ -143,18 +149,17 @@ class WorkspaceImpl (val app  :Scaled, val mgr  :WorkspaceManager,
 
     windows.remove(win)
     try {
-      // if we're about to close our last window, this workspace will hibernate and all of its
+      // if we're about to close our last window, this workspace will be closed and all of its
       // buffers will go away; we let the window know that so that when it closes its frames it can
       // clean things up more efficiently
-      val willHibernate = (windows.size == 1)
-      win.dispose(willHibernate)
+      val willClose = (windows.size == 1)
+      win.dispose(willClose)
       win.stage.close()
     } catch {
       case e :Throwable => log.log(s"Internal error closing $win", e)
     }
 
-    // if we just closed our last window, "hibernate" (we're not actually a reffed, but we're doing
-    // a largely similar thing; we just want to control our lifecycle more carefully)
+    // if we just closed our last window, close this workspace
     if (windows.isEmpty) {
       toClose.close()
       buffers.clear() // TODO: dispose?
@@ -170,7 +175,7 @@ class WorkspaceImpl (val app  :Scaled, val mgr  :WorkspaceManager,
     else {
       // create or recreate the *messages* buffer as needed
       val mb = buffers.find(_.name == MessagesName) || getMessages()
-      mb.append(Line.fromText(msg + System.lineSeparator))
+      mb.append(Line.fromTextNL(msg))
     }
   }
 
@@ -211,6 +216,15 @@ class WorkspaceImpl (val app  :Scaled, val mgr  :WorkspaceManager,
   override def addHintPath (path :Path) :Unit = mgr.addHintPath(name, path)
   override def removeHintPath (path :Path) :Unit = mgr.removeHintPath(name, path)
 
+  override val exec = app.exec.handleErrors(emitError)
+  override def emitError (err :Throwable) {
+    if (!Errors.isFeedback(err)) {
+      val trace = Errors.stackTraceToString(err)
+      app.debugLog(trace)
+      recordMessage(trace)
+    }
+  }
+
   override def toString = s"ws:$name"
 
   private final val ScratchName = "*scratch*"
@@ -221,7 +235,7 @@ class WorkspaceImpl (val app  :Scaled, val mgr  :WorkspaceManager,
     _pendingMessages = Nil
     val mbuf = createBuffer(Store.scratch(MessagesName, cwd), State.inits(Mode.Hint("log")), true)
     _pendingMessages foreach { msg =>
-      mbuf.append(Line.fromText(msg + System.lineSeparator))
+      mbuf.append(Line.fromTextNL(msg))
     }
     _pendingMessages = null
     mbuf
@@ -234,9 +248,26 @@ class WorkspaceImpl (val app  :Scaled, val mgr  :WorkspaceManager,
     // when a buffer's name changes, trigger a name conflict check on the next UI tick; we can't do
     // it immediately because we may end up trying to re-change the name while the current name
     // change was being dispatched
-    buf.nameV.onValue { name => app.exec.runOnUI(checkNameConflict(name)) }
-    bufferOpened.emit(buf)
+    buf.nameV.onValue { name => exec.runOnUI(checkNameConflict(name)) }
+    // when this buffer is killed, remove it from our list
     buf.killed.onEmit(buffers.remove(buf))
+    // create an object to watch this buffer's file and check it for staleness
+    new Object() {
+      val watchSvc = app.svcMgr.service(classOf[WatchService])
+      var watch :AutoCloseable = null
+      buf.killed.onEmit(close)
+      buf.storeV.onValue { store => close() ; open(store) }
+      open(buf.store)
+      def open (store :Store) :Unit = store.file.ifDefined { path =>
+        watch = watchSvc.watchFile(path, path => buf.checkStale())
+      }
+      def close () :Unit = if (watch != null) {
+        watch.close()
+        watch = null
+      }
+    }
+    // let interested parties know that we have a new buffer
+    bufferOpened.emit(buf)
     buf
   }
 
@@ -259,6 +290,7 @@ class WorkspaceImpl (val app  :Scaled, val mgr  :WorkspaceManager,
         // rename each buffer to name<p1>, name<p2/p1>, etc.
         sameName foreach { buf =>
           val path = Paths.get(buf.store.parent)
+          println(s"Renaming ${buf.name} due to conflict.")
           buf.nameV() = s"${buf.store.name}<${takeRight(cc, path)}>"
         }
         // map the renamed buffers by name, and then filter out buffers which now have a unique name
@@ -278,7 +310,10 @@ class WorkspaceImpl (val app  :Scaled, val mgr  :WorkspaceManager,
 
     val scene = new Scene(win)
     scene.getStylesheets().add(getClass.getResource("/scaled.css").toExternalForm)
-    val os = System.getProperty("os.name").replaceAll(" ", "").toLowerCase
+    val os = System.getProperty("os.name").replaceAll(" ", "").toLowerCase match {
+      case os if (os.contains("windows")) => "windows"
+      case os => os
+    }
     val oscss = getClass.getResource(s"/$os.css")
     if (oscss != null) scene.getStylesheets().add(oscss.toExternalForm)
     else app.logger.log(s"Unable to locate /$os.css")

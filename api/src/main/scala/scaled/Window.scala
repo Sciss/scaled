@@ -19,7 +19,7 @@ trait Window {
     /** Returns the window that contains this frame. */
     def window :Window = Window.this
 
-    /** Returns the buffer view that currently occupies this frame. */
+    /** Returns the buffer view that currently occupies this frame. May be `null`. */
     def view :BufferView
 
     /** Returns the store for the buffer edited previous to the current buffer in this frame.
@@ -34,6 +34,20 @@ trait Window {
     /** Opens a buffer for `store` and visits it.
       * @return the view for the buffer. */
     def visitFile (store :Store) = visit(window.workspace.openBuffer(store))
+
+    /** Closes and reloads the current buffer, preserving the scroll position and point.
+      * Note: any modifications to the current buffer will be lost. Be careful.
+      * @return the view for the buffer. */
+    def revisitFile () :BufferView = {
+      val file = view.buffer.store ; val p = view.point()
+      val top = view.scrollTop() ; val left = view.scrollLeft()
+      view.buffer.kill()
+      val nv = visitFile(file)
+      nv.scrollTop() = top
+      nv.scrollLeft() = left
+      nv.point() = p
+      nv
+    }
   }
 
   /** A reactive mapping of window-wide state. */
@@ -63,6 +77,13 @@ trait Window {
   /** Closes this window. When all windows in all workspaces are closed, the process will exit. */
   def close () :Unit
 
+  /** Returns the subset of the workspace buffers that have ever been visited in this window, in
+    * order of most recent activation. */
+  def buffers :SeqV[Buffer]
+
+  /** An executor which reports errors to this window. */
+  def exec :Executor
+
   /** Reports an unexpected error to the user.
     * The message will also be appended to the `*messages*` buffer. */
   def emitError (err :Throwable) :Unit
@@ -91,6 +112,13 @@ trait Window {
 
   /** Requests that this window be brought to the front of the window stack by the OS. */
   def toFront () :Unit
+
+  /** Returns the (window-scoped) history ring with the specified name. The ring will be created
+    * on-demand. */
+  def historyRing (name :String) = Mutable.getOrPut(
+    Rings(state), name, new Ring(workspace.config(EditorConfig.historySize)) {
+      override def toString = s"$name-history"
+    })
 }
 
 /** Describes the geometry of a [[Window]] or [[Frame]].

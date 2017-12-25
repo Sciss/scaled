@@ -16,9 +16,6 @@ class LineViewImpl (_line :LineV) extends TextFlow with LineView {
   override def line = _line
   private var _valid = false
 
-  // start out invisible
-  setVisible(false)
-
   // fontProperty.bind(ctrl.fontProperty)
   // fillProperty.bind(textFill)
   // impl_selectionFillProperty().bind(highlightTextFill)
@@ -37,14 +34,6 @@ class LineViewImpl (_line :LineV) extends TextFlow with LineView {
 
   /** Updates this line to reflect the supplied style change. */
   def onStyle (loc :Loc) :Unit = invalidate()
-
-  /** Updates this line's visibility. Lines outside the visible area of the buffer are marked
-    * non-visible and defer applying line changes until they are once again visible. */
-  def setViz (viz :Boolean) :Boolean = {
-    val validated = if (viz && !_valid) { validate() ; true } else false
-    setVisible(viz)
-    validated
-  }
 
   /** Marks this line view as invalid, clearing its children. */
   def invalidate () :Unit = if (_valid) {
@@ -65,9 +54,13 @@ class LineViewImpl (_line :LineV) extends TextFlow with LineView {
       private var last :Int = 0
 
       def add (start :Int, end :Int, styles :Seq[Tag[String]]) {
-        val text = _line.sliceString(start, end)
+        var text = _line.sliceString(start, end)
         assert(end > start)
-        assert(text.indexOf('\n') == -1, s"Text cannot have newlines: $text")
+        val nlidx = text.indexOf('\n')
+        if (nlidx != -1) {
+          new Exception(s"Text cannot have newlines: $text").printStackTrace(System.err);
+          text = text.substring(0, nlidx)
+        }
         val tnode = new FillableText(text)
         tnode.setFontSmoothingType(FontSmoothingType.LCD)
         val sc = tnode.getStyleClass
@@ -106,4 +99,6 @@ class LineViewImpl (_line :LineV) extends TextFlow with LineView {
       case _ => // nada
     }
   }
+
+  override def toString = s"$line:${_valid}"
 }

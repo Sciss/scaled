@@ -6,7 +6,7 @@ package scaled.code
 
 import scaled._
 import scaled.major.EditingMode
-import scaled.util.Chars
+import scaled.util.{Chars, Errors}
 
 object CodeConfig extends Config.Defs {
 
@@ -59,6 +59,9 @@ object CodeConfig extends Config.Defs {
   val blockDelimStyle = "blockDelimFace"
   /** The CSS style applied to the current block delimiters when mismatched. */
   val blockErrorStyle = "blockErrorFace"
+
+  /** The CSS style applied to the active completion choice. */
+  val activeChoiceStyle = "activeChoiceFace"
 }
 
 /** A base class for major modes which edit program code. */
@@ -69,7 +72,10 @@ abstract class CodeMode (env :Env) extends EditingMode(env) {
   override def configDefs = CodeConfig :: super.configDefs
   override def stylesheets = stylesheetURL("/code.css") :: super.stylesheets
   override def keymap = super.keymap.
-    bind("reindent",               "TAB").
+    bind("reindent-or-complete", "TAB").
+    bind("previous-completion",  "S-TAB").
+    bind("cancel-complete",      "C-g").
+
     bind("electric-newline",       "ENTER", "S-ENTER").
     bind("electric-open-bracket",  "{", "(", "[").
     bind("electric-close-bracket", "}", ")", "]").
@@ -82,6 +88,7 @@ abstract class CodeMode (env :Env) extends EditingMode(env) {
     bind("indent-region",    "C-M-\\").
     bind("comment-region",   "C-c C-c").
     bind("uncomment-region", "C-c C-u"). // TODO: prefix args?
+    bind("quote-region",     "C-c C-q").
 
     bind("show-syntax", "M-A-s");
 
@@ -91,6 +98,9 @@ abstract class CodeMode (env :Env) extends EditingMode(env) {
 
   /** A helper class for dealing with comments. */
   val commenter :Commenter
+
+  /** Used to complete code. */
+  def completer :CodeCompleter = CodeCompleter.completerFor(window.workspace, buffer)
 
   /** Indicates the current block, if any. Updated when bracket is inserted or the point moves. */
   val curBlock = OptValue[Block]()
@@ -103,8 +113,18 @@ abstract class CodeMode (env :Env) extends EditingMode(env) {
     * These must match the order of [[openBrackets]] exactly. */
   def closeBrackets = "})]"
 
-  // as the point moves around, track the active block
-  view.point onValue { p => curBlock() = blocker(p) }
+  /** The character used by [[quoteRegion]]. */
+  def quoteChar = '"'
+
+  /** The line separator used by [[quoteRegion]]. */
+  def quotedLineSeparator = ","
+
+  // as the point moves around...
+  view.point onValue { p =>
+    curBlock() = blocker(p) // track the active block
+    checkClearActiveComp()  // maybe clear the active completion
+  }
+
   // as the active block changes, highlight the delimiters
   curBlock onChange { (nb, ob) =>
     ob.map { b =>
@@ -120,7 +140,7 @@ abstract class CodeMode (env :Env) extends EditingMode(env) {
   }
 
   /** Computes the indentation for the line at `row`. */
-  def computeIndent (row :Int) :Int = indenter(row)
+  def computeIndent (row :Int) :Int = indenter(buffer, row)
 
   /** Computes the indentation for the line at `pos` and adjusts its indentation to match. If the
     * point is in the whitespace at the start of the indented line, it will be moved to the first
@@ -131,23 +151,188 @@ abstract class CodeMode (env :Env) extends EditingMode(env) {
     * computed indentation. This is true as one generally wants that if the user is interactively
     * requesting indentation on the current line, but if one is bulk indenting a region, then its
     * preferable not to introduce whitespace on blank lines.
+    *
+    * @return true if the line's indentation was changed, or if we advanced the point to the first
+    * non-whitespace character on the line (i.e. did something meaningful).
     */
-  def reindent (pos :Loc, indentBlanks :Boolean = true) {
+  def reindent (pos :Loc, indentBlanks :Boolean = true) :Boolean = {
     val indent = computeIndent(pos.row)
+    var acted = false
     if (indent >= 0 && (indentBlanks || buffer.line(pos).length > 0)) {
       // shift the line, if needed
       val delta = indent - Indenter.readIndent(buffer, pos)
       if (delta > 0) buffer.insert(pos.atCol(0), Line(" " * delta))
       else if (delta < 0) buffer.delete(pos.atCol(0), -delta)
+      // make a note of whether we changed anything
+      acted = (delta != 0)
       // if the point is now in the whitespace preceding the indent, move it to line-start
       val p = view.point()
-      if (p.row == pos.row && p.col < indent) view.point() = Loc(p.row, indent)
+      if (p.row == pos.row && p.col < indent) {
+        view.point() = Loc(p.row, indent)
+        acted = true
+      }
     } else if (indent < 0) window.emitStatus(
       s"Indenter has lost the plot [pos=$pos, indent=$indent]. Ignoring.")
+    acted
   }
 
-  /** Reindents the line at the point. */
-  def reindentAtPoint () :Unit = reindent(view.point())
+  import CodeCompleter._
+  class ActiveComp (val comp :Completion) {
+    // the current refined choices
+    var choices = refined
+
+    var activeIndex = 0
+    def active = choices(activeIndex)
+
+    val compsOptPop :OptValue[Popup] = view.addPopup({
+      // we might end up in a situation where the first time a completion pops up, the user has
+      // already typed in a refinement that matches none of the completions, but we can't clear
+      // ourselves out just yet because we're in the middle of our constructor; kinda messy but
+      // we'll just punt for now and show a "No matches." popup briefly
+      compsPopup(if (choices.isEmpty) Seq(Line("No completions.")) else comps)
+    })
+
+    def compsPopup (comps :Seq[LineV]) = Popup.lines(comps, Popup.DnRight(comp.start))
+    def comps = {
+      // figure out the max width of choices + sigs
+      def siglen (c :Choice, gap :Int) = c.sig.map(_.length + gap) getOrElse 0
+      val width = choices.map(c => c.insert.length + siglen(c, 1)).max
+      // TODO: get actual available space instead of hardcoding
+      val MaxChoices = 30
+      // truncate list to max choices, trimming above and below the active completion so we show a
+      // sliding window around it
+      def trimStart = Math.min(Math.max(0, activeIndex-2), choices.length-MaxChoices)
+      val trimmed = if (choices.size <= MaxChoices) choices
+      else choices.drop(trimStart).take(MaxChoices)
+      val avail = trimmed.map { c =>
+        val b = Line.builder(c.insert)
+        b += " " * (width-c.insert.length-siglen(c, 0))
+        c.sig.map(b.append)
+        if (c eq active) b.withStyle(activeChoiceStyle)
+        b.build()
+      }
+      avail
+    }
+
+    // if we have details, show those above the completion
+    var deetOptPop :OptValue[Popup] = null
+    def deetPopup = Popup.lines(active.details, Popup.UpRight(comp.start))
+    def checkDeets () :Unit = if (!active.details.isEmpty) {
+      if (deetOptPop == null) deetOptPop = view.addPopup(deetPopup)
+      else deetOptPop() = deetPopup
+    } else if (deetOptPop != null) {
+      deetOptPop.clear()
+      deetOptPop = null;
+    }
+    if (!choices.isEmpty) checkDeets()
+
+    def extendOrAdvance () {
+      // sanity check that the point isn't somewhere crazy
+      val point = view.point()
+      if (point.row != comp.start.row) throw Errors.feedback("Point not on completion line?")
+      val endCol = point.col
+      val startCol = comp.start.col
+      if (endCol < startCol) throw Errors.feedback("Point to left of completion start?")
+      // compute the longest shared prefix among our available completions
+      val longestPrefix = Completer.longestPrefix(choices.map(_.insert))
+      val typedPrefix = buffer.line(comp.start).sliceString(startCol, endCol)
+      val atLongest = typedPrefix equalsIgnoreCase longestPrefix
+      // if the prefix in the buffer is itself a prefix of the longest prefix (meaning we're not
+      // doing funny interspersed letter matching), and the longest prefix is longer than the
+      // prefix in the buffer, then extend to the longest prefix
+      if (longestPrefix.startsWith(typedPrefix) && !atLongest)
+        buffer.replace(comp.start, endCol-startCol, Line(longestPrefix))
+      // if we still have more than one choice, advance to the next choice
+      else if (choices.size > 1) advance(1)
+      // otherwise we've whittled down to a single completion, we're done
+      else clearActiveComp()
+    }
+
+    def advance (delta :Int) :Unit = if (!choices.isEmpty) {
+      activeIndex = (activeIndex + choices.length + delta) % choices.length
+      compsOptPop() = compsPopup(comps)
+      checkDeets()
+    }
+
+    // checks that the letters of glob (which must be lowercase) occur in comp, in order, but
+    // potentially skipping other letters along the way
+    def matches (glob :String, comp :String) :Boolean = {
+      if (glob.length == 0) return true
+      var pp = 0 ; var cc = 0 ; while (cc < comp.length) {
+        val pc = glob.charAt(pp) ; val cp = comp.charAt(cc)
+        if (pc == Character.toLowerCase(cp)) {
+          pp += 1
+        }
+        if (pp == glob.length) return true
+        cc += 1
+      }
+      false
+    }
+
+    def refined = {
+      val endCol = view.point().col
+      val startCol = comp.start.col
+      if (endCol < startCol) Seq()
+      else {
+        val glob = buffer.line(comp.start).sliceString(startCol, endCol).toLowerCase
+        comp.choices.filter(c => matches(glob, c.insert))
+      }
+    }
+
+    def refine () {
+      var ochoices = choices
+      choices = refined
+      if (choices.isEmpty) clearActiveComp()
+      else {
+        if (choices != ochoices) activeIndex = 0
+        compsOptPop() = compsPopup(comps)
+      }
+    }
+
+    def commit () {
+      buffer.replace(comp.start, view.point(), Seq(Line(active.insert)))
+      clearActiveComp()
+    }
+
+    def clear () {
+      compsOptPop.clear()
+      if (deetOptPop != null) deetOptPop.clear()
+    }
+
+    def containsPoint (p :Loc) = {
+      val maxlen = choices.map(_.insert.length).foldLeft(0)(_ + _)
+      p.row == comp.start.row && p.col >= comp.start.col && p.col < comp.start.col + maxlen
+    }
+  }
+
+  var activeComp :ActiveComp = null
+  val completeFns = Set("reindent-or-complete", "previous-completion")
+
+  /** Activates a completion at `pos`. *Note*: this moves the point to the end of the completion
+    * prefix detected at `pos`. This is necessary for completion refinement to work properly. */
+  def completeAt (pos :Loc) {
+    val (pstart, pend) = Chars.wordBoundsAt(buffer, pos)
+    view.point() = pend // move the point to the end of the to-be-completed prefix
+    if (activeComp != null) clearActiveComp()
+    completer.completeAt(buffer, pstart, pend).onFailure(wspace.emitError).onSuccess { comp =>
+      if (!comp.choices.isEmpty) {
+        activeComp = new ActiveComp(comp)
+      }
+    }
+  }
+
+  /** Clears the active completion, if any. */
+  def clearActiveComp () {
+    if (activeComp != null) {
+      activeComp.clear()
+      activeComp = null
+    }
+  }
+
+  /** Clears the active completion if the point has moved away from it. */
+  def checkClearActiveComp () {
+    if (activeComp != null && !activeComp.containsPoint(view.point())) clearActiveComp()
+  }
 
   /** Returns the close bracket for the supplied open bracket.
     * `?` is returned if the open bracket is unknown. */
@@ -191,19 +376,22 @@ abstract class CodeMode (env :Env) extends EditingMode(env) {
     if (syn.isComment) commenter.mkParagrapher(syn, buffer)
     else super.mkParagrapher(syn)
 
-  override def fillParagraph () {
-    // make sure we're "looking at" something fillable on this line
+  private def pointAtNonWS = {
     val p = view.point()
-    val wp = buffer.line(p).indexOf(isNotWhitespace, p.col) match {
+    buffer.line(p).indexOf(isNotWhitespace, p.col) match {
       case -1 => p
       case ii => p.atCol(ii)
     }
-    if (canAutoFill(wp)) super.fillParagraph()
+  }
+
+  override def fillParagraph () {
+    // make sure we're "looking at" something fillable on this line
+    if (canAutoFill(pointAtNonWS)) super.fillParagraph()
     else window.popStatus(s"$name-mode doesn't know how to fill this paragraph.")
   }
 
   override def refillLinesIn (start :Loc, end :Loc) =
-    if (!commenter.inComment(buffer, view.point())) super.refillLinesIn(start, end)
+    if (!commenter.inComment(buffer, pointAtNonWS)) super.refillLinesIn(start, end)
     else {
       val cend = trimEnd(end)
       buffer.replace(start, cend, commenter.refilled(buffer, fillColumn, start, cend))
@@ -219,6 +407,38 @@ abstract class CodeMode (env :Env) extends EditingMode(env) {
     }
   }
 
+  // customize some fns to work with code completion
+  override def selfInsertCommand (typed :String) {
+    super.selfInsertCommand(typed)
+    if (completer.shouldActivate(buffer, view.point(), typed)) {
+      completeAtPoint();
+    } else if (activeComp != null) {
+      activeComp.refine();
+    }
+  }
+
+  override def newline () {
+    if (activeComp == null) super.newline();
+    else activeComp.commit();
+  }
+
+  override def deleteBackwardChar () {
+    super.deleteBackwardChar()
+    if (activeComp != null) {
+      activeComp.refine()
+    }
+  }
+
+  override def previousLine () {
+    if (activeComp == null) super.previousLine()
+    else activeComp.advance(-1)
+  }
+
+  override def nextLine () {
+    if (activeComp == null) super.nextLine()
+    else activeComp.advance(1)
+  }
+
   //
   // FNs
 
@@ -230,8 +450,30 @@ abstract class CodeMode (env :Env) extends EditingMode(env) {
 
   @Fn("""Recomputes the current line's indentation based on the code mode's indentation rules and
          adjusts its indentation accordingly.""")
-  def reindent () {
-    reindentAtPoint()
+  def reindentAtPoint () :Unit = reindent(view.point())
+
+  @Fn("Activates a completion at the current point.")
+  def completeAtPoint () :Unit = completeAt(view.point())
+
+  @Fn("""If there is an active completion, extends the current match, or advances to the next
+         option if the buffer already contains the longest completion prefix. If no active
+         completion, reindents the current line. If the current line is properly indented,
+         starts a new completion at the point. In other words attempt to 'DWIM' when the tab
+         key is pressed.""")
+  def reindentOrComplete () {
+    val point = view.point()
+    if (activeComp != null) activeComp.extendOrAdvance()
+    else if (!reindent(point) && Chars.isWhitespace(buffer.charAt(point))) completeAtPoint()
+  }
+
+  @Fn("If there is an active completion, selects the previous choice.")
+  def previousCompletion () {
+    if (activeComp != null) activeComp.advance(-1)
+  }
+
+  @Fn("Clears and abandons any active completion.")
+  def cancelComplete () {
+    clearActiveComp();
   }
 
   @Fn("""Inserts a newline and performs any other configured automatic actions. This includes
@@ -247,6 +489,10 @@ abstract class CodeMode (env :Env) extends EditingMode(env) {
       newline()
       reindentAtPoint()
       view.point() = bp
+    }
+    // shenanigans to determine whether we should auto-insert the doc prefix
+    else if (commenter.inDocComment(buffer, p)) {
+      view.point() = commenter.insertDocPre(buffer, view.point())
     }
     reindentAtPoint()
   }
@@ -383,4 +629,26 @@ abstract class CodeMode (env :Env) extends EditingMode(env) {
       }
     }
   }
+
+  @Fn("""Places quotes around the region. If the start and end of the region are in column zero,
+         quotes are placed at the start and end of each line in the region, and the quoted line
+         separator is inserted between each quoted line. If the start or end of the region are
+         not in column zero, a quote character is placed only at the region start and end.""")
+  def quoteRegion () {
+    withRegion { (start, end) =>
+      if (start.col == 0 && end.col == 0) {
+        val lastEnd = buffer.backward(end, 1)
+        val lines = buffer.region(start, lastEnd)
+        buffer.replace(start, lastEnd, lines.map(l => quoteLine(l, l != lines.last)))
+      } else {
+        buffer.insert(end, quoteChar, Syntax.Default)
+        buffer.insert(start, quoteChar, Syntax.Default)
+      }
+    }
+  }
+
+  private def quoteLine (line :LineV, addSep :Boolean) =
+    if (line.length == 0) line
+    else Line.builder("").append(quoteChar).append(line).append(quoteChar).
+      append(if (addSep) quotedLineSeparator else "").build()
 }

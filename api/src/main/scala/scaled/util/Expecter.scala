@@ -19,7 +19,7 @@ import scaled._
 abstract class Expecter (exec :Executor, config :SubProcess.Config) {
   import SubProcess._
 
-  private val events = Signal[SubProcess.Event](exec.uiExec)
+  private val events = Signal[SubProcess.Event](exec.ui)
   events.onValue { _ match {
     case Output(text, isErr) =>
       if (_responder == null) onUnexpected(text, isErr)
@@ -63,22 +63,4 @@ abstract class Expecter (exec :Executor, config :SubProcess.Config) {
   def waitFor () :Int = proc.waitFor()
 
   private var _responder :(String, Boolean) => Boolean = _
-}
-
-object Expecter {
-
-  /** Returns an expecter that logs unexpected output to `log`, prefixed with `ident`. */
-  def withLogger (exec :Executor, log :Logger, prefix :String, command :String*) :Expecter =
-    new Expecter(exec, SubProcess.Config(command.toArray)) {
-      private def msg (msg :String, isErr :Boolean) = {
-        val kind = if (isErr) "stderr" else "stdout"
-        s"$prefix: [$kind] $msg"
-      }
-      override def onUnexpected (line :String, isErr :Boolean) {
-        log.log(msg(line, isErr))
-      }
-      override def onFailure (exn :Throwable, isErr :Boolean) {
-        exec.runOnUI { log.log(msg("expect failure", isErr), exn) }
-      }
-    }
 }

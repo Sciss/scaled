@@ -36,9 +36,6 @@ abstract class Env {
   /** For debug logging. */
   def log :Logger = msvc.log
 
-  /** For executing operations on the UI thread and background threads. */
-  def exec :Executor = msvc.exec
-
   /** Returns the config scope for use by the modes resolved with this environment. */
   def configScope :Config.Scope
 }
@@ -75,7 +72,7 @@ abstract class Mode (env :Env) {
   def desc :String = getClass.getName+"?"
 
   /** Returns the tags that describe this mode. See [[Major.tags]] and [[Minor.tags]]. */
-  def tags :Seq[String] = Seq()
+  def tags :Set[String] = Set()
 
   /** This mode's configuration. */
   final val config :Config = env.msvc.service[ConfigService].resolveModeConfig(
@@ -223,7 +220,7 @@ abstract class MajorMode (env :Env) extends Mode(env) {
 
   override def name = if (info != null) info.name else super.name
   override def desc = if (info != null) info.desc else super.desc
-  override def tags = if (info != null) info.tags.mkSeq else super.tags
+  override def tags = if (info != null) Set.from(info.tags) else super.tags
   private lazy val info = getClass.getAnnotation(classOf[Major])
 
   // display our major mode name in the modeline
@@ -251,6 +248,6 @@ abstract class MinorMode (env :Env) extends Mode(env) {
 
   override def name = if (info != null) info.name else super.name
   override def desc = if (info != null) info.desc else super.desc
-  override def tags = if (info != null) info.tags.mkSeq else super.tags
+  override def tags = if (info != null) Set.from(info.tags) else super.tags
   private lazy val info = getClass.getAnnotation(classOf[Minor])
 }

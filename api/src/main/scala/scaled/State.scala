@@ -5,10 +5,10 @@
 package scaled
 
 import scala.reflect.ClassTag
-import scaled.util.Errors
+import scaled.util.{BufferBuilder, Describable, Errors}
 
 /** Provides a read-only view of buffer state. See [[State]]. */
-abstract class StateV {
+abstract class StateV extends Describable {
 
   /** Returns the current state value associated with `key`, if any. */
   def get[T] (key :Class[T]) :Option[T]
@@ -34,6 +34,19 @@ abstract class StateV {
 
   /** Returns the keys for all currently defined state. */
   def keys :Set[Class[_]]
+
+  /** Adds a description of this state to `bb`. */
+  def describeSelf (bb :BufferBuilder) {
+    val kvs = keys.toSeq.flatMap(k => get(k).map(_.toString).map(v => (s"${k.getName}: " -> v)))
+    if (!kvs.isEmpty) {
+      bb.addSection("State")
+      bb.addKeysValues(kvs)
+    }
+
+    // append the description of any Describable piece of state
+    keys.toSeq.flatMap(k => get(k)).collect({ case d :Describable => d }).
+      foreach(_.describeSelf(bb))
+  }
 }
 
 /** Provides a mutable, but non-reactive view of buffer state. See [[RState]]. */
@@ -59,10 +72,11 @@ abstract class State extends StateV {
   */
 class RState (inits :State.Init[_]*) extends State {
 
-  private val _states = Mutable.cacheMap { key :Class[_] => new OptValue[Any](null) {
-    override def emptyFail = throw new NoSuchElementException(s"No state for $key")
-  }}
-  inits foreach { _.apply(this) }
+  /** A signal emitted when a new type of state is added. */
+  val keyAdded = Signal[Class[_]]()
+
+  /** A signal emitted when a type of state that was mapped is cleared. */
+  val keyCleared = Signal[Class[_]]()
 
   /** Returns the state value associated with the specified type, if any. */
   def apply[T] (key :Class[T]) :OptValue[T] = _states.get(key).asInstanceOf[OptValue[T]]
@@ -86,6 +100,18 @@ class RState (inits :State.Init[_]*) extends State {
   override def clear[T] (key :Class[T]) :Unit = apply(key).update(None)
 
   override def toString = keys.map(k => s"$k=${apply(k)}").toString
+
+  private val _states = Mutable.cacheMap { key :Class[_] =>
+    val opt = new OptValue[Any](null) {
+      override def emptyFail = throw new NoSuchElementException(s"No state for $key")
+    }
+    opt.onChange((nval, oval) => {
+      if (nval.isDefined && !oval.isDefined) keyAdded.emit(key)
+      else if (!nval.isDefined && oval.isDefined) keyCleared.emit(key)
+    })
+    opt
+  }
+  inits foreach { _.apply(this) }
 }
 
 /** Static [[State]] bits. */

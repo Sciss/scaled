@@ -308,6 +308,29 @@ object Line {
     /** Returns the current length of this builder's line. */
     def length = _length
 
+    /** Appends `c` to this line builder. */
+    def append (c :Char) :Builder = {
+      val olength = _length
+      expand(1)
+      _cs(olength) = c
+      this
+    }
+    /** A synonym for [[append(Char)]]. */
+    def += (c :Char) = append(c)
+
+    /** Appends `text` to this line builder. */
+    def append (text :CharSequence) :Builder = {
+      val olength = _length
+      var ll = text.length ; expand(text.length)
+      var ii = 0 ; while (ii < ll) {
+        _cs(olength+ii) = text.charAt(ii)
+        ii += 1
+      }
+      this
+    }
+    /** A synonym for [[append(CharSequence)]]. */
+    def += (text :CharSequence) = append(text)
+
     /** Appends `text` to this line builder. */
     def append (text :String) :Builder = {
       val olength = _length
@@ -327,6 +350,16 @@ object Line {
     }
     /** A synonym for [[append(Array[Char])]]. */
     def += (text :Array[Char]) = append(text)
+
+    /** Appends `line` to this line builder. */
+    def append (line :LineV) :Builder = {
+      val olength = _length
+      expand(line.length)
+      line.sliceInto(0, line.length, _cs, _xs, _ts, _lts, olength)
+      this
+    }
+    /** A synonym for [[append(LineV)]]. */
+    def += (line :LineV) = append(line)
 
     /** Appends `text` and assigns its syntax to `syntax`. */
     def appendWithSyntax[T] (text :String, syntax :Syntax) :Builder = {
@@ -483,24 +516,55 @@ object Line {
   /** Creates a line builder with `s` as the line text. */
   def builder (s :String) = new Builder(s.toCharArray)
 
-  /** Creates one or more lines from the supplied text. Newlines are assumed to be equal to
-    * [[System.lineSeparator]]. */
+  /** Calls `fn` on each line of `text`, handling both CR and CRLF style line separators. The
+    * second argument to `fn` is the line's offset in characters from the start of `text`. */
+  def onLines (text :String)(fn :(String, Int) => Unit) {
+    var ii = 0 ; var ss = 0
+    while (ii < text.length) {
+      val c = text.charAt(ii)
+      if (c == '\r' || c == '\n') {
+        fn(text.substring(ss, ii), ss)
+        ss = ii+1
+        // if we just saw CR and it's immediately followed by NL, skip the NL
+        if (c == '\r' && ss < text.length && text.charAt(ss) == '\n') {
+          ii += 1
+          ss += 1
+        }
+      }
+      ii += 1
+    }
+    // always report the final line, even if blank; this matches the behavior of String.split('\n')
+    // on a string with a trailing newline
+    fn(text.substring(ss, text.length), ss);
+  }
+
+  /** Splits `text` into lines, handling both CR and CRLF style line separators. */
+  def splitText (text :String) :Seq[String] = {
+    var lines = Seq.builder[String]()
+    onLines(text) { (line, pos) => lines += line }
+    lines.build()
+  }
+
+  /** Creates one or more lines from the supplied text. */
   def fromText (text :String) :Seq[Line] =
     // TODO: remove tab hackery when we support tabs
-    text.split(System.lineSeparator, -1).mkSeq.map(_.replace('\t', ' ')).map(apply)
+    splitText(text).map(_.replace('\t', ' ')).map(apply)
 
   /** Calls [[fromText]] on `text` and tacks on a blank line. */
   def fromTextNL (text :String) = fromText(text) :+ Empty
 
-  /** Converts `lines` to a string which will contain line separators between lines. */
-  def toText (lines :Ordered[LineV]) :String = lines.map(_.asString).mkString(System.lineSeparator)
+  /** Appends `lines` to `buf`, separated by `sep`. */
+  def toText (lines :Ordered[LineV], buf :JStringBuilder, sep :String) :JStringBuilder =
+    lines.foldLeft(buf)((b, l) => b.append(l).append(sep)).deleteCharAt(buf.length-1)
+
+  /** Converts `lines` to a string, separated by the platform line separator. */
+  def toText (lines :Ordered[LineV]) :String =
+    toText(lines, new JStringBuilder(), System.lineSeparator).toString
 
   /** Converts `cs` into an array of `Char`. */
   def toCharArray (cs :CharSequence) :Array[Char] = {
     val arr = new Array[Char](cs.length)
-    var ii = 0 ; while (ii < arr.length) {
-      arr(ii) = cs.charAt(ii) ; ii += 1
-    }
+    var ii = 0 ; while (ii < arr.length) { arr(ii) = cs.charAt(ii) ; ii += 1 }
     arr
   }
 }

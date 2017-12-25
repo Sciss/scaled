@@ -35,7 +35,7 @@ class WatchManager (log :Logger, exec :Executor) extends AbstractService with Wa
     }
   }
 
-  private def addWatch (dir :Path)(cb :WatchEvent[_] => Unit) = byDir.get(dir).signal onValue cb
+  private def addWatch (dir :Path)(cb :JConsumer[WatchEvent[_]]) = byDir.get(dir).signal onValue cb
 
   private def pollWatches () :Unit = try {
     // wait for key to be signalled
@@ -55,7 +55,7 @@ class WatchManager (log :Logger, exec :Executor) extends AbstractService with Wa
     asInstanceOf[Array[WatchEvent.Kind[_]]] // oh Scala, you devil
 
   private case class WatchInfo (dir :Path) {
-    val signal = Signal[WatchEvent[_]](exec.uiExec)
+    val signal = Signal[WatchEvent[_]](exec.ui)
     val key = dir.register(service, kinds, SensitivityWatchEventModifier.HIGH)
     byKey.put(key, this)
     log.log(s"Created watch: $dir")

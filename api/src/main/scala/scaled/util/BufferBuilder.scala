@@ -7,6 +7,12 @@ package scaled.util
 import scaled._
 import scaled.major.TextConfig
 
+/** A trait used to dynamically include elements in `describe-foo` buffers. */
+trait Describable {
+  /** Appends a description of `this` to `bb`. */
+  def describeSelf (bb :BufferBuilder) :Unit
+}
+
 /** A helper class for programmatically populating a buffer. This makes it easy to create a styled
   * buffer with headers, text wrapped to a particular width, text in multiple columns, etc. It's
   * used by `describe-mode` and is useful for similar "generate a buffer describing something"
@@ -104,14 +110,15 @@ class BufferBuilder (val fillWidth :Int) {
     * include the separator and whitespace in `key` (i.e. `foo: ` or `bar = `). `value` will be
     * wrapped to the builder's fill width minus the width of the key (wrapped lines will be prefixed
     * with `key.length` spaces). */
-  def addKeyValue (key :String, value :String) :this.type = {
+  def addKeyValue (key :String, value :Any) :this.type = {
     def simple (value :CharSequence) = Line.builder(s"$key$value").withStyle(
       TextConfig.prefixStyle, 0, key.length).build()
     val valueFill = math.max(fillWidth-key.length, MinFillWidth)
-    if (value.length <= valueFill) add(simple(value))
+    val valueStr = String.valueOf(value)
+    if (valueStr.length <= valueFill) add(simple(valueStr))
     else {
       val filler = new Filler(valueFill)
-      filler.append(Filler.flatten(value))
+      filler.append(Filler.flatten(valueStr))
       add(simple(filler.filled.head))
       val prefix = toDashes(key, ' ')
       filler.filled.drop(1).foreach(f => add(Line(prefix + f)))
@@ -121,16 +128,16 @@ class BufferBuilder (val fillWidth :Int) {
 
   /** Adds `keyvalue` for each key/value pair in `kvs`, where `key` is styled in
     * [[TextConfig.prefixStyle]] and all keys are padded to the width of the widest key. */
-  def addKeysValues (kvs :(String,String)*) :this.type = {
-    val padWidth = (0 /: kvs)((m, kv) => math.max(m, kv._1.length))
+  def addKeysValues (kvs :(String,Any)*) :this.type = addKeysValues(Iterable.view(kvs))
+
+  /** Adds `keyvalue` for each key/value pair in `kvs`, where `key` is styled in
+    * [[TextConfig.prefixStyle]] and all keys are padded to the width of the widest key. */
+  def addKeysValues (kvs :Iterable[(String,Any)]) :this.type = {
+    val padWidth = kvs.fold(0)((m, kv) => math.max(m, kv._1.length))
     def pad (key :String) = key + (" " * (padWidth-key.length))
     kvs foreach { case (k, v) => addKeyValue(pad(k), v) }
     this
   }
-
-  /** Adds `keyvalue` for each key/value pair in `kvs`, where `key` is styled in
-    * [[TextConfig.prefixStyle]] and all keys are padded to the width of the widest key. */
-  def addKeysValues (kvs :Seq[(String,String)]) :this.type = addKeysValues(kvs.toScala :_*)
 
   private def styledLine (text :CharSequence, styles :scala.Seq[String]) =
     ((Line.builder(text) /: styles)(_.withStyle(_))).build()

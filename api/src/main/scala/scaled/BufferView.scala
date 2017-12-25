@@ -62,8 +62,14 @@ abstract class BufferView {
     else if (p.row >= ntop + h) point() = p.atRow(ntop + h - 1)
   }
 
-  /** Displays `popup` in this buffer. */
+  /** Displays `popup` over this buffer, making it the primary popup.
+    * Any previous primary popup will be cleared. */
   def showPopup (popup :Popup) :Unit
+
+  /** Adds `popup` over this buffer. Does not affect the primary popup. Can be updated by the
+    * caller by updating the returned `OptValue`, or cleared (caller must manually clear) by
+    * calling `clear()`. */
+  def addPopup (popup :Popup) :OptValue[Popup]
 }
 
 /** `BufferView` related types and utilities. */

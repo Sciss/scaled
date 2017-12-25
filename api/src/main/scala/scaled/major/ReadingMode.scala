@@ -256,17 +256,16 @@ abstract class ReadingMode (env :Env) extends MajorMode(env) {
     desiredColumn = oldDesiredColumn
   }
 
-  // TODO: add config: paragraph-ignore-whitespace and treat non-empty lines which contain only
-  // whitespace as paragraph delimiters
   @Fn("""Moves to the next paragraph. Paragraphs are currently delimited by blank lines.
          TODO: make this more emacs-like?""")
   def nextParagraph () {
     @tailrec def seek (row :Int, seenNonBlank :Boolean) :Loc = {
       if (row >= buffer.lines.size) Loc(row, 0)
       else {
-        val len = buffer.lineLength(row)
-        if (len == 0 && seenNonBlank) Loc(row, 0)
-        else seek(row+1, seenNonBlank || len > 0)
+        val line = buffer.line(row)
+        val isBlank = line.firstNonWS == line.length
+        if (isBlank && seenNonBlank) Loc(row, 0)
+        else seek(row+1, seenNonBlank || !isBlank)
       }
     }
     view.point() = seek(view.point().row, false)
@@ -278,9 +277,10 @@ abstract class ReadingMode (env :Env) extends MajorMode(env) {
     @tailrec def seek (row :Int, seenNonBlank :Boolean) :Loc = {
       if (row <= 0) Loc(0, 0)
       else {
-        val len = buffer.lineLength(row)
-        if (len == 0 && seenNonBlank) Loc(row, 0)
-        else seek(row-1, seenNonBlank || len > 0)
+        val line = buffer.line(row)
+        val isBlank = line.firstNonWS == line.length
+        if (isBlank && seenNonBlank) Loc(row, 0)
+        else seek(row-1, seenNonBlank || !isBlank)
       }
     }
     view.point() = seek(view.point().row, false)
@@ -355,15 +355,7 @@ abstract class ReadingMode (env :Env) extends MajorMode(env) {
   def reloadBuffer () {
     if (buffer.dirty) window.popStatus("Cannot reload modified buffer.")
     else if (!buffer.store.exists) window.popStatus("Cannot reload ephemeral buffers.")
-    else {
-      val file = buffer.store ; val p = view.point()
-      val top = view.scrollTop() ; val left = view.scrollLeft()
-      buffer.kill()
-      val nv = frame.visitFile(file)
-      nv.scrollTop() = top
-      nv.scrollLeft() = left
-      nv.point() = p
-    }
+    else frame.revisitFile()
   }
 
   //
@@ -391,10 +383,10 @@ abstract class ReadingMode (env :Env) extends MajorMode(env) {
     val p = view.point()
     val line = buffer.line(p)
     val info = (line.lineTags ++ line.tags) match {
-      case Nil  => List("No tags.")
-      case tags => tags.map(_.toString)
+      case Nil  => List(Line("No tags."))
+      case tags => tags.flatMap(t => Line.fromText(t.toString))
     }
-    view.popup() = Popup.text(info, Popup.UpRight(p))
+    view.popup() = Popup.lines(info, Popup.UpRight(p))
   }
 
   //
@@ -406,5 +398,5 @@ abstract class ReadingMode (env :Env) extends MajorMode(env) {
   }
 
   /** The history ring used for config var values. */
-  protected def gotoLineHistory = Workspace.historyRing(wspace, "goto-line")
+  protected def gotoLineHistory = wspace.historyRing("goto-line")
 }

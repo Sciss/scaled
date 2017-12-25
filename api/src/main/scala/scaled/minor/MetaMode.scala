@@ -40,7 +40,7 @@ class MetaMode (env :Env) extends MinorMode(env) {
     bind("execute-extended-command", "M-x");
 
   /** Queries the user for the name of a config var and invokes `fn` on the chosen var. */
-  def withConfigVar (fn :Config.VarBind[_] => Unit) {
+  def withConfigVar (fn :JConsumer[Config.VarBind[_]]) {
     val vars = disp.modes.flatMap(m => m.varBindings)
     val comp = Completer.from(vars)(_.v.name)
     window.mini.read("Var:", "", varHistory(wspace), comp) onSuccess fn
@@ -52,22 +52,26 @@ class MetaMode (env :Env) extends MinorMode(env) {
   @Fn("""Reads a buffer name from the minibuffer and switches to it.""")
   def switchToBuffer () {
     val curb = buffer
+    // if we're the only window in the workspace, use the workspace buffer list (so we get
+    // potentially never visited buffers like *messages*), otherwise use this window's visited
+    // buffers list
+    val buffers = if (wspace.windows.size == 1) wspace.buffers else window.buffers
     // if the current frame has a previous buffer, and it is still open, use that as our default
     // buffer, otherwise fallback to the top buffer in the window buffers list (skipping our
     // current buffer), and if all else fails, just use our current buffer
-    val defb = window.focus.prevStore.flatMap(s => wspace.buffers.find(_.store == s)) orElse
-      wspace.buffers.filter(_ != curb).headOption getOrElse curb
-    val comp = Completer.buffer(wspace, defb, Set(curb))
-    window.mini.read(s"Switch to buffer (default ${defb.name}):", "", bufferHistory(wspace),
-                     comp) onSuccess frame.visit
+    val defb = window.focus.prevStore.flatMap(s => buffers.find(_.store == s)) orElse
+      buffers.filter(_ != curb).headOption getOrElse curb
+    val comp = Completer.buffer(buffers, defb, Set(curb))
+    window.mini.read(s"Switch to buffer (default ${defb.name}):", "", bufferHistory, comp).
+      onSuccess(frame.visit)
   }
 
   @Fn("Reads a buffer name from the minibuffer and kills (closes) it.")
   def killBuffer () {
     val current = buffer
     val prompt = s"Kill buffer (default ${current.name}):"
-    val comp = Completer.buffer(wspace, current)
-    window.mini.read(prompt, "", bufferHistory(wspace), comp) onSuccess(_.kill())
+    val comp = Completer.buffer(window.buffers, current)
+    window.mini.read(prompt, "", bufferHistory, comp).onSuccess(_.kill())
 
     // TODO: document our process when we have one:
 
@@ -81,7 +85,7 @@ class MetaMode (env :Env) extends MinorMode(env) {
   @Fn("Reads a filename from the minibuffer and visits it in a buffer.")
   def findFile () {
     window.mini.read("Find file:", buffer.store.parent, fileHistory(wspace),
-                     Completer.file) onSuccess frame.visitFile
+                     Completer.file(editor.exec)) onSuccess frame.visitFile
   }
 
   @Fn("Reads a filename from the minibuffer and visits it in a buffer. The file need not exist.")
@@ -227,32 +231,30 @@ class MetaMode (env :Env) extends MinorMode(env) {
   @Fn("Describes the current state of the editor. This is mainly for debugging and the curious.")
   def describeEditor () {
     val bb = new BufferBuilder(this.view.width()-1)
-    def addState (state :StateV) {
-      val kvs = state.keys.toSeq.flatMap(
-        k => state.get(k).map(_.toString).map(v => (s"${k.getName}: " -> v)))
-      if (!kvs.isEmpty) {
-        bb.addSection("State")
-        bb.addKeysValues(kvs)
-      }
-    }
     bb.addHeader("Editor")
-    addState(editor.state)
-
-    bb.addHeader("Workspace")
-    bb.addKeysValues("Name: " -> wspace.name,
-                     "Root: " -> wspace.root.toString,
-                     "Buffers: " -> wspace.buffers.size.toString)
-    addState(wspace.state)
-
-    bb.addHeader("Buffers")
-    wspace.buffers.foreach { buf =>
-      bb.addSubHeader(buf.name)
-      bb.addKeysValues("Store: " -> buf.store.toString,
-                       "Length: " -> buf.offset(buf.end).toString)
-      addState(buf.state)
-    }
+    editor.state.describeSelf(bb)
 
     env.msvc.service[PackageService].describePackages(bb)
+
+    def defang (text :String) = text.replace("\n", "\\n")
+    bb.addHeader("System Properties")
+    val sysprops = System.getProperties
+    val spKeys = Ordered.view(sysprops.stringPropertyNames).sorted
+    bb.addKeysValues(spKeys.map(name => (s"$name ", defang(sysprops.getProperty(name)))))
+
+    bb.addHeader("Environment")
+    val sysenv = System.getenv
+    val seKeys = Ordered.view(sysenv.keySet).sorted
+    bb.addKeysValues(seKeys.map(name => (s"$name ", defang(sysenv.get(name)))))
+
+    bb.addHeader("Runtime")
+    val rt = Runtime.getRuntime
+    bb.addKeysValues(
+      "Max memory: " -> rt.maxMemory,
+      "Total memory: " -> rt.totalMemory,
+      "Free memory: " -> rt.freeMemory,
+      "Processors: " -> rt.availableProcessors
+    )
 
     val hbuf = wspace.createBuffer(Store.scratch(s"*editor*", buffer.store),
                                    reuse=true, state=State.inits(Mode.Hint("help")))
@@ -277,7 +279,7 @@ class MetaMode (env :Env) extends MinorMode(env) {
       val cfg = SubProcess.Config(parseCmd(cmd), cwd=Paths.get(buffer.store.parent))
       val ebuf = wspace.createBuffer(Store.scratch(s"*exec:${cfg.cmd(0)}*", buffer.store),
                                      reuse=true, state=State.inits(Mode.Hint("text")))
-      SubProcess(cfg, env.exec, ebuf)
+      SubProcess(cfg, window.exec, ebuf)
       frame.visit(ebuf)
     }
   }
@@ -304,7 +306,8 @@ class MetaMode (env :Env) extends MinorMode(env) {
   @Fn("Opens the configuration file for the specified mode in a buffer.")
   def editModeConfig () {
     val comp = Completer.from(disp.modes)(_.name)
-    window.mini.read("Mode:", name, modeHistory(wspace), comp) map(_.config) onSuccess(editConfig)
+    val mname = disp.modes.last.name // default to major mode name
+    window.mini.read("Mode:", mname, modeHistory(wspace), comp) map(_.config) onSuccess(editConfig)
   }
 
   @Fn("Opens the configuration file for the specified service in a buffer.")
@@ -313,9 +316,10 @@ class MetaMode (env :Env) extends MinorMode(env) {
     window.mini.read("Service:", "", serviceHistory, comp) map(_._2) onSuccess(editConfig)
   }
 
-  private def configScopeHistory = historyRing(wspace, "config-scope")
-  private def shellCommandHistory = historyRing(wspace, "shell-command")
-  private def serviceHistory = historyRing(wspace, "service")
+  private def bufferHistory = window.historyRing("buffer")
+  private def configScopeHistory = wspace.historyRing("config-scope")
+  private def shellCommandHistory = wspace.historyRing("shell-command")
+  private def serviceHistory = wspace.historyRing("service")
 
   private def editConfig (config :Config) {
     val scopes = config.scope.toList ; val comp = Completer.from(scopes)(_.name)

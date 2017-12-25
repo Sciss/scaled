@@ -16,7 +16,7 @@ class ServiceInjector (val log :Logger, val exec :Executor, editor :Editor)
   def metaFile (name: String) :Path = ??? // implemented by ServiceManager
 
   def service[T] (clazz :Class[T]) :T = resolveService(clazz).asInstanceOf[T]
-  def process[P] (thunk: => P) :Pipe[P] = new Plumbing(exec.bgExec, thunk)
+  def process[P] (thunk: => P) :Pipe[P] = new Plumbing(exec.bg, thunk)
   def injectInstance[T] (clazz :Class[T], args :List[Any]) :T = {
     def fail (t :Throwable) = throw new InstantiationException(
       s"Unable to inject $clazz [args=$args]").initCause(t)
@@ -61,7 +61,7 @@ class ServiceInjector (val log :Logger, val exec :Executor, editor :Editor)
 class ServiceManager (app :Scaled) extends ServiceInjector(app.logger, app.exec, app) {
 
   private var services = Mutable.cacheMap { iclass :Class[_] =>
-    injectInstance(iclass.asInstanceOf[Class[AbstractService]], Nil) }
+    startService(iclass.asInstanceOf[Class[AbstractService]]) }
 
   // we provide MetaService, so stick ourselves in the cache directly; meta!
   services.put(getClass, this)
@@ -81,6 +81,15 @@ class ServiceManager (app :Scaled) extends ServiceInjector(app.logger, app.exec,
   // also auto-load services in packages added after startup
   app.pkgMgr.moduleAdded.onValue(autoLoadSvcs)
 
+  def shutdown () {
+    services.asMap.values.foreach { svc =>
+      try svc.willShutdown()
+      catch {
+        case ex :Throwable => app.logger.log(s"Failed to shutdown $svc", ex)
+      }
+    }
+  }
+
   override def metaFile (name :String) = app.pkgMgr.metaDir.resolve(name)
 
   override def resolveService (sclass :Class[_]) = {
@@ -91,5 +100,10 @@ class ServiceManager (app :Scaled) extends ServiceInjector(app.logger, app.exec,
       case Some(impl) => services.get(impl)
     }
   }
-  // TODO: when to unload resolved services?
+
+  private def startService (iclass :Class[AbstractService]) :AbstractService = {
+    val svc = injectInstance(iclass, Nil)
+    svc.didStartup()
+    svc
+  }
 }

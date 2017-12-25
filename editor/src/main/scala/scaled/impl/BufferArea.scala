@@ -22,8 +22,8 @@ import javafx.scene.paint.{Color, Paint}
 import javafx.scene.shape.Rectangle
 import javafx.scene.text.{Font, Text, TextBoundsType}
 
+import java.util.HashMap
 import java.util.concurrent.Callable
-import scala.collection.JavaConversions._
 import scaled._
 
 /** Displays a buffer and passes events through to a dispatcher. */
@@ -59,7 +59,7 @@ class BufferArea (val bview :BufferViewImpl, val disp :DispatcherImpl) extends R
     override protected def invalidated () {
       // if font is changed by calling setFont, then css might need to be reapplied since font size
       // affects calculated values for styles with relative values
-      if (!fontSetByCss) Dep.reapplyCSS(BufferArea.this);
+      if (!fontSetByCss) Dep.reapplyCSS(BufferArea.this)
     }
   }
   font.addListener(new InvalidationListener() {
@@ -79,8 +79,8 @@ class BufferArea (val bview :BufferViewImpl, val disp :DispatcherImpl) extends R
   /** Tells this buffer area that it's going into the background. This frees up some resources that
     * are easy enough to recreate if/when the buffer area is made active again. */
   def hibernate () {
-    // invalidate all non-visible lines (this will clear out their internal UI elements)
-    onLines { (line, isViz) => if (!isViz) line.invalidate() }
+    // remove all of our lines, we'll add them back in on reactivation
+    contentNode.removeLines(0, lineNodes.getChildren.size)
   }
 
   private var charWidth  = 0d
@@ -158,13 +158,14 @@ class BufferArea (val bview :BufferViewImpl, val disp :DispatcherImpl) extends R
     private[this] var _pos :Popup.Pos = _
 
     def display (pop :Popup) {
-      clear() // clear any previous bits
+      getChildren.clear() // clear any previous bits
 
       if (pop.isError) getStyleClass.add("errpop")
       else getStyleClass.remove("errpop")
 
       val pbuffer = BufferImpl.scratch("*popup*")
       pbuffer.insert(pbuffer.start, pop.lines)
+      pop.styler(pbuffer)
       val pview = new BufferViewImpl(pbuffer, pop.lines.map(_.length).max, pop.lines.size)
       getChildren.add(new BufferArea(pview, disp))
 
@@ -176,8 +177,8 @@ class BufferArea (val bview :BufferViewImpl, val disp :DispatcherImpl) extends R
 
     def clear () {
       // TODO: fade the popup out?
-      popup.getChildren.clear()
-      popup.setVisible(false)
+      getChildren.clear()
+      setVisible(false)
       _pos = null
     }
 
@@ -219,16 +220,27 @@ class BufferArea (val bview :BufferViewImpl, val disp :DispatcherImpl) extends R
     }
   }
 
-  private val popup = new PopWin()
+  private val mainPopup = new PopWin()
   private def checkPopup (force :Boolean)(popOpt :Option[Popup]) = popOpt match {
-    case None      => popup.clear()
+    case None      => mainPopup.clear()
     // if our content node is not currently laid out, it will recheck the popup when it's done
-    case Some(pop) => if (!contentNode.isNeedsLayout || force) popup.display(pop)
+    case Some(pop) => if (!contentNode.isNeedsLayout || force) mainPopup.display(pop)
   }
   bview.popup onValue checkPopup(false)
 
+  bview.popupAdded.onValue { popopt =>
+    val win = new PopWin()
+    contentNode.getChildren.add(win)
+    popopt.onValueNotify {
+      case Some(popup) => win.display(popup)
+      case None        => win.clear() ; contentNode.getChildren.remove(win)
+    }
+  }
+
   // contains our line nodes and other decorative nodes (cursor, selection, etc.)
   class ContentNode extends Region {
+    private var vizTop = 0
+
     getStyleClass.add("content")
 
     // forward mouse events to the control
@@ -250,9 +262,32 @@ class BufferArea (val bview :BufferViewImpl, val disp :DispatcherImpl) extends R
         event.consume()
       }
     })
+
     // move our lines when scrollTop/Left change
-    bview.scrollTop onEmit updateVizLines
+    bview.scrollTop onChange { (ntop, otop) => updateVizLines() }
     bview.scrollLeft onValue { left => contentNode.setLayoutX(-left*charWidth) }
+
+    // listen for addition and removal of lines
+    bview.changed onValue { change =>
+      // println(s"Lines @${change.row} ${change.delta}")
+      val top = bview.scrollTop() ; val bot = top+bview.height()+1
+      val tstart = math.max(top, change.row)
+      if (change.delta < 0) {
+        // if the change overlaps the visible area, remove the visible lines
+        val tend = math.min(change.row-change.delta, bot)
+        if (tend > tstart) removeLines(tstart-top, tend-top)
+      } else if (change.delta > 0) {
+        // if the change overlaps the visible area, add the visible lines
+        val tend = math.min(change.row+change.delta, bot)
+        if (tend > tstart) addLines(tstart-top, bview.lines.slice(tstart, tend))
+      }
+      // if the change happened before the vizTop, it must be adjusted
+      if (change.row < vizTop) vizTop += change.delta
+      updateVizLines()
+    }
+
+    // if the buffer view height changes, update our viz lines as well
+    bview.height onValue { height => updateVizLines() }
 
     def updateCursor (point :Loc) {
       val line = bview.buffer.line(point)
@@ -296,8 +331,6 @@ class BufferArea (val bview :BufferViewImpl, val disp :DispatcherImpl) extends R
     override def getChildren = super.getChildren
 
     override def layoutChildren () {
-      val start = System.nanoTime()
-
       // position our lines at the proper y offset
       val x = snappedLeftInset ; var y = snappedTopInset
       val iter = lineNodes.getChildren.iterator
@@ -308,50 +341,67 @@ class BufferArea (val bview :BufferViewImpl, val disp :DispatcherImpl) extends R
         y += lineHeight
       }
 
-      // update which lines are visible
-      updateVizLines()
+      // position the whole contentNode at the proper x offset
       contentNode.setLayoutX(-bview.scrollLeft()*charWidth)
 
       // position the cursor
       updateCursor(bview.point())
-
-      val elapsed = (System.nanoTime() - start)/1000000
-      if (elapsed > 5) println(s"BufferArea layout (${bview.buffer.store}) $elapsed ms")
 
       // if we have a popup, we might need to show it now that we know where everything is
       checkPopup(true)(bview.popup.getOption)
     }
 
     def updateVizLines () {
-      onLines(_.setViz(_))
-      val top = bview.scrollTop()
-      contentNode.setLayoutY(-bview.lines(top).getLayoutY)
+      val viewLines = bview.height()+1 ; val top = bview.scrollTop()
+      val lines = bview.lines ; val bot = math.min(top + viewLines, lines.size)
+      val preChildCount = lineNodes.getChildren.size
+      val otop = vizTop
+
+      try {
+        // trim or add lines at the top, as needed
+        if (otop < top) removeLines(0, top-otop)
+        else if (otop > top) addLines(0, lines.slice(top, math.min(otop, bot)))
+
+        val childCount = lineNodes.getChildren.size
+        if (childCount > viewLines) removeLines(viewLines, childCount)
+        else if (childCount < viewLines) addLines(childCount, lines.slice(top+childCount, bot))
+
+        vizTop = top
+        requestLayout()
+
+      } catch {
+        case e :Throwable =>
+          throw new RuntimeException(
+            s"updateVizLines otop=$otop top=$top bot=$bot lines=${lines.size} " +
+              s"vlines=$viewLines ccount=$preChildCount", e)
+      }
+    }
+
+    def addLines (index :Int, lines :SeqV[LineViewImpl]) {
+      // println(s"addLines @$index +${lines.size}")
+      lines.foreach { _.validate() }
+      lineNodes.getChildren.addAll(index, lines.asJList)
+    }
+    def removeLines (from :Int, to :Int) {
+      val capped = math.min(to, lineNodes.getChildren.size)
+      // println(s"removeLines [$from, $to/$capped)")
+      lineNodes.getChildren.subList(from, capped).foreach {
+        _.asInstanceOf[LineViewImpl].invalidate() }
+      lineNodes.getChildren.remove(from, capped)
     }
   }
   private val contentNode = new ContentNode()
   contentNode.setManaged(false)
 
   // put our scene graph together
-  contentNode.getChildren.addAll(lineNodes, cursor, uncursor, popup)
+  contentNode.getChildren.addAll(lineNodes, cursor, uncursor, mainPopup)
   getChildren.add(contentNode)
 
   // move the cursor when the point is updated
   bview.point onValueNotify contentNode.updateCursor
 
-  // listen for addition and removal of lines
-  bview.changed onValue { change =>
-    // println(s"Lines @${change.row} ${change.delta}")
-    if (change.delta < 0) {
-      lineNodes.getChildren.remove(change.row, change.row-change.delta)
-      // TODO: let these nodes know they've been removed so they can cleanup?
-    } else if (change.delta > 0) {
-      val nodes = bview.lines.slice(change.row, change.row+change.delta)
-      lineNodes.getChildren.addAll(change.row, nodes.asJList)
-    }
-    requestLayout()
-  }
-  // add all the current lines to the buffer
-  lineNodes.getChildren.addAll(bview.lines.asJList)
+  // display the lines visible at the top of the buffer
+  contentNode.updateVizLines()
 
   // request relayout when our view width/height changes
   bview.width onValue { _ => requestLayout() }
@@ -378,8 +428,6 @@ class BufferArea (val bview :BufferViewImpl, val disp :DispatcherImpl) extends R
     if (nwc != bview.width() || nhc != bview.height()) {
       // println(s"VP resized $nw x $nh -> $nwc x $nhc")
       wasResized(nwc, nhc)
-      // update visible lines
-      contentNode.updateVizLines()
       // TODO: update scrollTop/scrollLeft if needed?
     }
   }
@@ -390,16 +438,6 @@ class BufferArea (val bview :BufferViewImpl, val disp :DispatcherImpl) extends R
     // break that loop and separately handle current versus preferred size in BufferView
     bview.width() = widthChars
     bview.height() = heightChars
-  }
-
-  private def onLines (fn :(LineViewImpl,Boolean) => Unit) {
-    val top = bview.scrollTop()
-    val bot = top + bview.height()
-    val lines = bview.lines
-    var idx = lines.size-1 ; while (idx >= 0) {
-      fn(lines(idx), idx >= top && idx <= bot)
-      idx -= 1
-    }
   }
 
   override def getCssMetaData = BufferArea.getClassCssMetaData
@@ -417,6 +455,7 @@ class BufferArea (val bview :BufferViewImpl, val disp :DispatcherImpl) extends R
 
 /** [BufferArea] helper classes and whatnot. */
 object BufferArea {
+  import java.util.{List => JList, ArrayList, Collections}
 
   object StyleableProperties {
     val FONT = new FontCssMetaData[BufferArea]("-fx-font", Font.getDefault()) {
@@ -424,14 +463,27 @@ object BufferArea {
       override def getStyleableProperty (n :BufferArea) :StyleableProperty[Font] = n.font
     }
 
-    val STYLEABLES :java.util.List[CssMetaData[_ <: Styleable, _]] = {
-      val styleables = new java.util.ArrayList[CssMetaData[_ <: Styleable, _]](
+    val STYLEABLES :JList[CssMetaData[_ <: Styleable, _]] = {
+      val styleables = new ArrayList[CssMetaData[_ <: Styleable, _]](
         Region.getClassCssMetaData())
       styleables.add(FONT)
-      java.util.Collections.unmodifiableList(styleables)
+      Collections.unmodifiableList(styleables)
     }
   }
 
-  def getClassCssMetaData :java.util.List[CssMetaData[_ <: Styleable, _]] =
+  def getClassCssMetaData :JList[CssMetaData[_ <: Styleable, _]] =
     StyleableProperties.STYLEABLES
+
+  // HACK: terrible hack to work around JavaFX bug or my misunderstanding + misuse
+  def resetStyleHelper (area :BufferArea) :Unit = StyleHelperField.set(area, null)
+  private val StyleHelperField = find(classOf[BufferArea], "styleHelper")
+  private def find (cl :Class[_], nm :String) :java.lang.reflect.Field = {
+    for (field <- cl.getDeclaredFields) {
+      if (field.getName == nm) {
+        field.setAccessible(true)
+        return field
+      }
+    }
+    find(cl.getSuperclass, nm)
+  }
 }

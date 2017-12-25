@@ -25,6 +25,7 @@ class DispatcherImpl (window :WindowImpl, resolver :ModeResolver, view :BufferVi
 
   private val _willInvoke = Signal[String]()
   private val _didInvoke = Signal[String]()
+  private val _didHandle = Signal[String]()
   private var _curFn :String = _
   private var _prevFn :String = _
 
@@ -36,6 +37,8 @@ class DispatcherImpl (window :WindowImpl, resolver :ModeResolver, view :BufferVi
   private var _trigger = Seq[KeyPress]()
   private var _dispatchTyped = false
   private var _escapeNext = false
+
+  private var _minorStateResolver :Connection = Connection.Noop
 
   /** The buffer area for which we're dispatching events. */
   val area = createBufferArea()
@@ -54,22 +57,50 @@ class DispatcherImpl (window :WindowImpl, resolver :ModeResolver, view :BufferVi
     // set up our new major mode
     _majorMeta = new MajorModeMeta(major)
     _metas = List(_majorMeta)
-    // automatically activate any minor modes that match our major mode's tags
-    resolver.minorModes(major.tags ++ tags, view.buffer.state.keys) foreach { mode =>
-      try addMode(false)(resolver.resolveMinor(mode, view, mline, this, major, Nil))
+
+    // activate any minor modes that match our major mode's tags and buffer state
+    val allTags = (major.tags ++ tags).toSeq
+    maybeAddMinors(resolver.tagMinorModes(allTags))
+    modesChanged()
+
+    // if we were replacing an existing major mode, give feedback to the user
+    if (hadMajor) window.popStatus("${major.name} activated.")
+
+    // if the buffer state changes, maybe add new minor modes
+    _minorStateResolver.close()
+    _minorStateResolver = view.buffer.state.keyAdded.onEmit {
+      if (maybeAddMinors(resolver.tagMinorModes(allTags)) > 0) {
+        modesChanged()
+      }
+    }
+  }
+
+  private def maybeAddMinors (minors :Unordered[String]) :Int = {
+    var count = 0
+    val activeModes = _metas.map(_.name).toSet
+    val iter = minors.iterator ; while (iter.hasNext) {
+      val mode = iter.next
+      if (!activeModes.contains(mode)) try {
+        resolver.resolveMinor(mode, view, mline, this, major(), Nil) ifDefined { minst =>
+          addMode(false)(minst)
+          count += 1
+        }
+      }
       catch {
         case e :Throwable =>
           window.emitError(e)
           window.emitStatus(s"Failed to resolve minor mode '$mode'. See *messages* for details.")
       }
     }
-    modesChanged()
-    // if we were replacing an existing major mode, give feedback to the user
-    if (hadMajor) window.popStatus("${major.name} activated.")
+    count
   }
 
   /** Processes the supplied key event, dispatching a fn if one is triggered thereby. */
-  def keyPressed (kev :KeyEvent) :Unit = {
+  def keyPressed (kev :KeyEvent) {
+    // this is a hacky workaround for LINUX where the CapsLock key is reported as a CAPS keypress
+    // by JavaFX even if it has been remapped to be a Control key; sigh
+    if (kev.getCode() == KeyCode.CAPS) return
+
     kev.getEventType match {
       case KeyEvent.KEY_PRESSED =>
         // if this is a modifier key press, ignore it; wait for the modified key press
@@ -126,6 +157,7 @@ class DispatcherImpl (window :WindowImpl, resolver :ModeResolver, view :BufferVi
         // come in, but none did, so we need to treat the last key press like a missed fn
         if (_dispatchTyped) invokeMissed()
     }
+
     // consume all key events so that they don't percolate up and misbehave
     kev.consume()
   }
@@ -136,10 +168,12 @@ class DispatcherImpl (window :WindowImpl, resolver :ModeResolver, view :BufferVi
     _metas foreach(_.dispose(true, bufferDisposing))
     _metas = Nil // render ourselves useless
     _prefixes = Set()
+    _minorStateResolver.close()
   }
 
   override def willInvoke = _willInvoke
   override def didInvoke = _didInvoke
+  override def didHandle = _didHandle
   override def curFn = _curFn
   override def prevFn = _prevFn
 
@@ -156,7 +190,7 @@ class DispatcherImpl (window :WindowImpl, resolver :ModeResolver, view :BufferVi
         removeMode(minor)
         window.popStatus(s"$mode mode deactivated.")
       case _ =>
-        addMode(true)(resolver.resolveMinor(mode, view, mline, this, major(), Nil))
+        resolver.resolveMinor(mode, view, mline, this, major(), Nil) ifDefined addMode(true)
     }
   }
 
@@ -241,8 +275,17 @@ class DispatcherImpl (window :WindowImpl, resolver :ModeResolver, view :BufferVi
       view.buffer.undoStack.delimitAction(view.point())
       didInvokeFn()
 
+      // if the fn returned a future, listen for errors on it and report them to the window
+      res match {
+        case future :Future[_] => future.onFailure(window.emitError)
+        case _ => // never mind
+      }
+
       // if the fn returns anything other than false, we assume it handled the key
-      if (res != java.lang.Boolean.FALSE) return true
+      if (res != java.lang.Boolean.FALSE) {
+        _didHandle.emit(fn.name)
+        return true
+      }
 
       // otherwise try the next fn in the list
       ll = ll.tail
