@@ -64,7 +64,13 @@ class Scaled extends Application with Editor {
   val server = new Server(this)
   val pkgMgr = new PackageManager(logger)
   val wspMgr = new WorkspaceManager(this)
-  val svcMgr = new ServiceManager(this)
+  val wtchMgr = new WatchManager(logger, exec)
+  val svcMgr = new ServiceManager(this) {
+    override def resolveService(sclass: Class[_]): AbstractService = {
+      if (sclass == classOf[WatchService]) wtchMgr  // WTF
+      else super.resolveService(sclass)
+    }
+  }
   val cfgMgr = svcMgr.injectInstance(classOf[ConfigManager], Nil)
 
   val configScope = Config.Scope("global", pkgMgr.metaDir, None)
@@ -78,11 +84,11 @@ class Scaled extends Application with Editor {
     // we have to defer resolution of auto-load services until the above constructors have
     // completed; always there are a twisty maze of initialization dependencies
     svcMgr.resolveAutoLoads()
-    // listen for open files events
-    OpenFilesHelper.setListener(files => onMainThread { files.foreach(wspMgr.visit) })
+    // listen for open files events    // N.B.: crashes on Linux:
+//    OpenFilesHelper.setListener(files => onMainThread { files.foreach(wspMgr.visit) })
     // create the starting editor and visit therein the starting files
     val argvFiles = Seq.view(getParameters.getRaw) map wspMgr.resolve
-    wspMgr.visit(stage, argvFiles ++ OpenFilesHelper.launchFiles)
+    wspMgr.visit(stage, argvFiles /* N.B.: crashes on Linxu: ++ OpenFilesHelper.launchFiles */)
     // start our command server
     server.start()
   }
@@ -109,10 +115,10 @@ object Scaled {
   /** The port on which [Server] listens for commands. */
   final val Port = (Option(System.getenv("SCALED_PORT")) getOrElse "32323").toInt
 
-  def main (args :Array[String]) {
-    // if we're running on Mac, wire up an open files handler; this has to happen immediately or
-    // we'll miss events delivered right after startup
-    OpenFilesHelper.init()
+  def main (args :Array[String]) {     // N.B. This crashes on Linux with InvocationTargetException:
+    //    // if we're running on Mac, wire up an open files handler; this has to happen immediately or
+//    // we'll miss events delivered right after startup
+//    OpenFilesHelper.init()
     // if there's already a Scaled instance running, pass our args to it and exit; otherwise launch
     // our fully operational mothership
     if (!sendFiles(args)) Application.launch(classOf[Scaled], args :_*)
