@@ -88,7 +88,7 @@ class Scaled extends Application with Editor {
 //    OpenFilesHelper.setListener(files => onMainThread { files.foreach(wspMgr.visit) })
     // create the starting editor and visit therein the starting files
     val argvFiles = Seq.view(getParameters.getRaw) map wspMgr.resolve
-    wspMgr.visit(stage, argvFiles /* N.B.: crashes on Linxu: ++ OpenFilesHelper.launchFiles */)
+    wspMgr.visit(stage, argvFiles /* N.B.: crashes on Linux: ++ OpenFilesHelper.launchFiles */)
     // start our command server
     server.start()
   }
